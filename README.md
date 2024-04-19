@@ -129,7 +129,7 @@ If you already have a schema called `jobmaster` in your database, you can specif
 jobmaster = JobMaster(db_engine=my_database_engine, schema="job_mistress")
 ```
 
-If you change any of the task definitions, you can update the database schema by running `jobmaster.deploy()` again. Running `jobmaster.deploy(_reset=True)` will drop all tables and recreate them from scratch, losing any jobs you had in your queue.
+If you change any of the task definitions, you must update the database by running `jobmaster.deploy()` again. Running `jobmaster.deploy(_reset=True)` will drop the schema and all tables then recreate them from scratch, losing any jobs you had in your queue.
 
 ## Tasks
 
@@ -211,7 +211,7 @@ def bar(a: int, b: [1, 2, 3], c: str):
 The `Dependency` object takes the task function, a time (in hours), and the arguments to pass to the task.
 In this example, the task `bar` depends on the task `foo` with `a=1` and `b` the same as the `b` of the job for `bar`.
 When a job with task-type `"bar"` is popped from the queue, JobMaster will first check if there is a job for task-type `"foo"` with `a=1` and `b` the same as the `b` of the job for `bar`, which has been **completed in the past 2 hours**.
-If there is, it will execute that job first. If there isn't, it will insert a job for task-type `"foo"` with `a=1` and `b` the same as the `b` of the job for `bar` into the queue, with a higher priority than the job for `bar`, then re-insert the job for `bar` into the queue.
+If there isn't, it will insert a job for task-type `"foo"` with `a=1` and `b` the same as the `b` of the job for `bar` into the queue, with a higher priority than the job for `bar`, then re-insert the job for `bar` into the queue.
 
 #### Process limits
 
