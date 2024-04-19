@@ -145,9 +145,9 @@ def foo(a: int, b: int):
     # do something
 ```
 This will register the function `foo` as a task with type key `'my_tasks'` and task key `'foo'`.
-JobMaster will register the parameters `a` and `b`, and their types (both `int`) are infered from the function signature, it is therefore important to use python type hints. 
+JobMaster will register the parameters `a` and `b`, and their types (both `int`) are infered from the function signature, it is therefore important to use python type hints.
 
-#### "select-from" parameters
+#### Optional parameters
 
 If a parameter is optional, you can specify a default value for it:
 ```python
@@ -155,6 +155,9 @@ If a parameter is optional, you can specify a default value for it:
 def foo(a: int = 1, b: int = 2):
     # do something
 ```
+
+#### "select-from" parameters
+
 If a parameter has a number of possible options, this should be specified in the type hint:
 ```python
 @task
@@ -189,7 +192,7 @@ def foo(a: int, b: [1, 2, 3]):
 
 #### Dependencies
 
-Tasks can depend on other tasks. This is specified by passing a list of `Dependency` objects to the `dependencies` argument of the `@task` decorator:
+Tasks can depend on other tasks. This is specified by passing `Dependency` object (or a list of `Dependency` objects) to the `dependencies` argument of the `@task` decorator:
 ```python
 from jobmaster import task, Dependency, same
 
@@ -209,3 +212,25 @@ The `Dependency` object takes the task function, a time (in hours), and the argu
 In this example, the task `bar` depends on the task `foo` with `a=1` and `b` the same as the `b` of the job for `bar`.
 When a job with task-type `"bar"` is popped from the queue, JobMaster will first check if there is a job for task-type `"foo"` with `a=1` and `b` the same as the `b` of the job for `bar`, which has been **completed in the past 2 hours**.
 If there is, it will execute that job first. If there isn't, it will insert a job for task-type `"foo"` with `a=1` and `b` the same as the `b` of the job for `bar` into the queue, with a higher priority than the job for `bar`, then re-insert the job for `bar` into the queue.
+
+#### Process limits
+
+You can specify a process limit for a task by passing an integer to the `process_limit` argument of the `@task` decorator:
+```python
+from jobmaster import task, Dependency, same
+
+@task(type_key='cool_tasks', process_limit=10, write_all=['b'])
+def foo(a: int, b: [1, 2, 3]):
+    # do something
+
+@task(
+    type_key='cool_tasks', 
+    write_all=['b'],
+    dependencies=Dependency(foo, 2, a=1, b=same),
+    process_limit=3
+)
+def bar(a: int, b: [1, 2, 3], c: str):
+    # do something
+```
+In this example, JobMaster will not execute more than 10 jobs of type `"foo"` at the same time on the same system, and will not execute more than 3 jobs of type `"bar"` at the same time on the same system.
+
