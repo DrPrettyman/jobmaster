@@ -21,16 +21,15 @@ Once you have properly configured JobMaster, this task will be registered with "
 
 You can add a job to the queue by calling the procedure
 ```postgresql
--- Add a job to the queue
--- jobmaster.insert_job takes 4 arguments:
---      1. The type key of the task
---      2. The task key of the task
---      3. The priority of the job
---      4. The arguments to pass to the task, json formatted
-
 call jobmaster.insert_job('my_tasks', 'task1', 10, '{"file_path": "/tmp/sum.txt", "a": 1, "b": 2}'::json)
 ```
 from wherever you have a connection to your database: from a different python script, from a web application, etc..
+`jobmaster.insert_job` takes 4 arguments:
+1. The type key of the task
+2. The task key of the task
+3. The priority of the job
+4. The arguments to pass to the task, json formatted
+
 Somewhere in your python project, you will have a script that pops jobs from the queue and executes them:
 
 ```python
