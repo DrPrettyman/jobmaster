@@ -188,6 +188,14 @@ class Task:
         return self._parameters
 
     @property
+    def parameter_keys(self):
+        return [_.name for _ in self.parameters]
+
+    @property
+    def parameter_dict(self):
+        return {_.name: _ for _ in self.parameters}
+
+    @property
     def help(self):
         if self._help is None:
             self._help = self._parse_help()

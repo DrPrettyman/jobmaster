@@ -55,9 +55,17 @@ def _parse_params_from_signature(signature: inspect.Signature):
     return params
 
 
-def parse_argument_type(arg):
-    _out = []
-    for _pair in arg.strip('{}').strip('"')[1:-1].split(')","('):
+def parse_argument_type(arg_str: str) -> dict:
+    try:
+        args = json.loads(arg_str)
+    except json.JSONDecodeError:
+        args = arg_str
+
+    if isinstance(args, dict):
+        return args
+
+    _out = dict()
+    for _pair in args.strip('{}').strip('"')[1:-1].split(')","('):
         first_comma = _pair.index(',')
         _key, _json_value = _pair[:first_comma], _pair[first_comma + 1:]
 
@@ -66,5 +74,43 @@ def parse_argument_type(arg):
         except json.JSONDecodeError:
             _v = _json_value.strip('\\"')
 
-        _out.append((_key, _v))
+        _out[_key] = _v
+
     return _out
+
+
+class StdLogger:
+    def __init__(self, name: str = "JobMaster"):
+        self.name = name
+
+    def debug(self, msg):
+        print(f"{datetime.datetime.now()} | DEBUG {self.name}: {msg}")
+
+    def info(self, msg):
+        print(f"{datetime.datetime.now()} | INFO {self.name}: {msg}")
+
+    def warning(self, msg):
+        print(f"{datetime.datetime.now()} | WARNING {self.name}: {msg}")
+
+    def error(self, msg):
+        print(f"{datetime.datetime.now()} | ERROR {self.name}: {msg}")
+
+    def critical(self, msg):
+        print(f"{datetime.datetime.now()} | CRITICAL {self.name}: {msg}")
+
+
+class NothingLogger:
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        pass
+
+    def critical(self, msg):
+        pass

@@ -1,5 +1,6 @@
 import json
-
+from typing import Callable
+from itertools import product
 import sqlalchemy
 import functools
 import datetime
@@ -84,9 +85,10 @@ class Job:
                  db_engine: sqlalchemy.engine.base.Engine,
                  db_schema: str,
                  task: Task,
+                 logger: Callable,
                  priority: int = 0,
                  status: int = 0,
-                 arguments: dict = None,
+                 arguments: dict | str = None,
                  job_id: str = None,
                  created_at: datetime.datetime = None,
                  collect_id: str = None,
@@ -94,13 +96,22 @@ class Job:
 
         if job_id is None:
             job_id = uuid4().hex
+        self.job_id = job_id
+
         if arguments is None:
             arguments = dict()
+        if isinstance(arguments, str):
+            arguments = utils.parse_argument_type(arguments)
+        if not isinstance(arguments, dict):
+            raise ValueError(f"Invalid arguments: {arguments}")
+        self.arguments = arguments
+
+        self.logger = logger
 
         self._engine = db_engine
         self._schema = db_schema
         self._cmd_id = cmd_id
-        self.job_id = job_id
+
         self.task = task
         self.priority = priority
 
@@ -109,16 +120,55 @@ class Job:
             created_at = datetime.datetime.utcnow()
         self.created_at = created_at
 
-        self.arguments = arguments
         self.collect_id = collect_id
+        self.message = message
+
+    def __bool__(self):
+        return True
+
+    def set_message(self, message: str):
         self.message = message
 
     @property
     def status(self):
         return _status_lookup[self._status]
 
-    def __call__(self, *args, **kwargs):
-        pass
+    @property
+    def parameters_with_all_value(self):
+        return [_key for _key in self.task.write_all if self.arguments.get(_key) == 'ALL']
+
+    def arguments_for_spawned_jobs(self) -> list[dict]:
+        options = dict()
+        for _param_key in self.parameters_with_all_value:
+            _parameter = self.task.parameter_dict.get(_param_key)
+            if _parameter is None:
+                self.set_message(f"Parameter {_param_key} not recognised")
+                self.update(4)
+                self.logger.error(f"Parameter {_param_key} not recognised")
+                return []
+            _arg_options = _parameter.select_from
+            if len(_arg_options) == 0:
+                self.set_message(f"Parameter {_param_key} has no options")
+                self.update(4)
+                self.logger.error(f"Parameter {_param_key} has no options")
+                return []
+            options[_param_key] = _arg_options
+
+        if len(options) == 0:
+            return []
+
+        # create jobs with all combinations of options
+        opt_tups = []
+        for k, v in options.items():
+            opt_tups.append([(k, sv) for sv in v])
+        new_job_options = [{k: v for k, v in _tup} for _tup in [_p for _p in product(*opt_tups)]]
+        new_args = []
+        for _opt in new_job_options:
+            _args = self.arguments.copy()
+            _args.update(_opt)
+            new_args.append(_args)
+
+        return new_args
 
     @property
     def _db_rows(self):
@@ -189,12 +239,34 @@ class Job:
             )
         return " UNION ALL ".join(selects)
 
+    def safe_execute(self):
+        _success = False
+        try:
+            result = self.task.function(**self.arguments)
+            self.message = f"Executed at {datetime.datetime.utcnow()} with result: {str(result)}"
+            self.update(3)
+            _success = True
+        except Exception as _error:
+            self.message = f"Error at {datetime.datetime.utcnow()}: {_error}"
+            self.update(4)
+        return _success
+
 
 class JobMaster:
     def __init__(self,
                  db_engine: sqlalchemy.engine.base.Engine,
                  schema: str = 'jobmaster',
-                 cmd_id: str = None):
+                 cmd_id: str = None,
+                 logger=None):
+
+        if logger is None:
+            self.logger = utils.NothingLogger
+        elif logger == print:
+            self.logger = utils.StdLogger
+        elif all(hasattr(logger, _attr) for _attr in ('debug', 'info', 'warning', 'error', 'critical')):
+            self.logger = logger
+        else:
+            raise ValueError("Invalid logger")
 
         self._engine = db_engine
         self._schema = schema
@@ -261,13 +333,6 @@ class JobMaster:
 
     def get(self, key):
         return self.__getitem__(key)
-
-    def execute(self, type_key: str, job_key: str, **kwargs):
-        job = self.get((type_key, job_key))
-        if not job:
-            raise ValueError(f"Job {type_key}.{job_key} not recognised")
-
-        return job.function(**kwargs)
 
     def write_tasks(self):
         """
@@ -353,7 +418,8 @@ class JobMaster:
             job_id=job_id,
             created_at=created_at,
             collect_id=collect_id,
-            message=message
+            message=message,
+            logger=self.logger
         )
 
     def write_job(self, job: Job | list[Job], write_args: bool = False):
@@ -379,3 +445,33 @@ class JobMaster:
     def current_jobs(self):
         with self._engine.connect() as conn:
             return conn.execute(sqlalchemy.text(f"SELECT * FROM {self._schema}.jobs")).fetchall()
+
+    def execute(self, job: Job):
+        # first check "write all" parameters
+        options = job.arguments_for_spawned_jobs()
+
+        if len(options) > 0:
+            # create jobs with all combinations of options
+            # with status 1
+            new_jobs = [
+                self.job(
+                    type_key=job.task.type_key,
+                    task_key=job.task.key,
+                    priority=job.priority + 1,
+                    arguments=_args,
+                    status=1
+                )
+                for _args in options
+            ]
+            # write jobs to database
+            self.write_job(new_jobs, write_args=True)
+            # Update this job to "completed"
+            job.set_message(f"Created {len(new_jobs)} jobs with all options")
+            job.update(3)
+            return True
+
+        # then check dependencies
+        # TODO: fill in this part!
+
+        # execute job
+        job.safe_execute()
