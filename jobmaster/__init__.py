@@ -1,11 +1,14 @@
 import json
-from typing import Callable
-from itertools import product
-import sqlalchemy
 import functools
 import datetime
 import os
+
 from uuid import uuid4
+from typing import Callable
+from itertools import product
+
+import sqlalchemy
+from sqlalchemy.sql.elements import TextClause
 
 from .deploy import deploy
 from .classes import Task, Dependency, SameParameter
@@ -125,12 +128,16 @@ class Job:
 
     def __bool__(self):
         return True
+    
+    @property
+    def active(self):
+        return self._status in (0, 1, 2)
 
     def set_message(self, message: str):
         self.message = message
 
     @property
-    def status(self):
+    def status_str(self):
         return _status_lookup[self._status]
 
     @property
@@ -158,10 +165,10 @@ class Job:
             return []
 
         # create jobs with all combinations of options
-        opt_tups = []
+        option_tuples = []
         for k, v in options.items():
-            opt_tups.append([(k, sv) for sv in v])
-        new_job_options = [{k: v for k, v in _tup} for _tup in [_p for _p in product(*opt_tups)]]
+            option_tuples.append([(k, sv) for sv in v])
+        new_job_options = [{k: v for k, v in _tup} for _tup in [_p for _p in product(*option_tuples)]]
         new_args = []
         for _opt in new_job_options:
             _args = self.arguments.copy()
@@ -171,7 +178,7 @@ class Job:
         return new_args
 
     @property
-    def _db_rows(self):
+    def _db_rows(self) -> tuple[str, list[str]]:
         if self.collect_id is None:
             _collect_id = "NULL"
         else:
@@ -183,11 +190,44 @@ class Job:
             _message = f"'{self.message}'"
 
         queue_row = f"('{self.job_id}', {_collect_id}, {self._status}, '{__SYSTEM_NODE_NAME__}', {__SYSTEM_PID__}, '{self._cmd_id}', '{datetime.datetime.utcnow()}', {self.priority}, '{self.task.type_key}', '{self.task.key}', {_message})"
-        arg_rows = [f"('{self.job_id}', '{_k}', '{json.dumps(_v)}')" for _k, _v in self.arguments.items()]
+        arg_rows = [f"('{self.job_id}', '{_k}', '{json.dumps(_v)}'::json)" for _k, _v in self.arguments.items()]
 
         return queue_row, arg_rows
 
-    def update(self, status: int, _execute: bool = True):
+    @property
+    def dependencies_sql_table(self) -> str:
+        selects = []
+        for _dep in self.task.dependencies:
+            args = [(_k, _v) for _k, _v in _dep.args_specified]
+            for _k in _dep.args_same:
+                if _k in self.arguments.keys():
+                    args.append((_k, self.arguments[_k]))
+                else:
+                    raise ValueError(f"Dependency argument {_k} not found in job arguments")
+
+            arg_rows = [f"ROW('{_k}', '{json.dumps(_v)}'::json)::jobmaster_argument" for _k, _v in args]
+            arg_array = f"ARRAY[{', '.join(arg_rows)}]"
+
+            sql = f"""
+                SELECT  '{self.task.type_key}' AS type_key,
+                        '{self.task.key}' AS task_key,
+                        '{_dep.type_key}' AS dependency_type_key,
+                        '{_dep.task_key}' AS dependency_task_key,
+                        {_dep.time} AS time,
+                        {arg_array} AS arguments                         
+                """
+            selects.append(sql)
+        return " UNION ALL ".join(selects)
+
+    def update(self, status: int, _execute: bool = True) -> TextClause | None:
+        """
+        Update the status of the job and write to the database.
+        If the status is 0 (local), the arguments will also be written to the database,
+
+        :param status:
+        :param _execute:
+        :return:
+        """
         if status == self._status:
             return
 
@@ -223,21 +263,6 @@ class Job:
             return
         else:
             return sql
-
-    @property
-    def dependencies_sql_table(self):
-        selects = []
-        for _dep in self.task.dependencies:
-            selects.append(
-                f"""
-                SELECT  '{self.task.type_key}' AS type_key,
-                        '{self.task.key}' AS task_key,
-                        '{_dep.type_key}' AS dependency_type_key,
-                        '{_dep.task_key}' AS dependency_task_key,
-                        {_dep.time} AS time
-                """
-            )
-        return " UNION ALL ".join(selects)
 
     def safe_execute(self):
         _success = False
@@ -422,23 +447,35 @@ class JobMaster:
             logger=self.logger
         )
 
-    def write_job(self, job: Job | list[Job], write_args: bool = False):
-        if isinstance(job, Job):
-            job = [job]
+    def update(self, jobs: Job | list[Job], status: int):
+        """
+        Performs the same function as Job.update(), but for potentially multiple jobs.
+        If the status of a job is 0 (local), the arguments will be written to the database,
+        otherwise only the job status will be updated.
+        
+        :param jobs: a Job or list of Jobs
+        :param status: The status to update to
+        :return: 
+        """
+        
+        if isinstance(jobs, Job):
+            jobs = [jobs]
 
         queue_rows = []
         arg_rows = []
-
-        for _j in job:
+        for _j in jobs:
+            _old_status = _j._status
+            _j.update(status, _execute=False)
             _q, _a = _j._db_rows
             queue_rows.append(_q)
-            arg_rows.extend(_a)
+            if _old_status == 0:
+                arg_rows.extend(_a)
 
         with self._engine.connect() as conn:
             _queue_values = ', \n'.join(queue_rows)
-            _arg_values = ', \n'.join(arg_rows)
             conn.execute(sqlalchemy.text(f"INSERT INTO {self._schema}.jobs \nVALUES \n{_queue_values};"))
-            if write_args:
+            if arg_rows:
+                _arg_values = ', \n'.join(arg_rows)
                 conn.execute(sqlalchemy.text(f"INSERT INTO {self._schema}.arguments \nVALUES \n{_arg_values};"))
             conn.commit()
 
@@ -448,9 +485,9 @@ class JobMaster:
 
     def execute(self, job: Job):
         # first check "write all" parameters
-        options = job.arguments_for_spawned_jobs()
+        new_job_args = job.arguments_for_spawned_jobs()
 
-        if len(options) > 0:
+        if len(new_job_args) > 0:
             # create jobs with all combinations of options
             # with status 1
             new_jobs = [
@@ -458,15 +495,14 @@ class JobMaster:
                     type_key=job.task.type_key,
                     task_key=job.task.key,
                     priority=job.priority + 1,
-                    arguments=_args,
-                    status=1
+                    arguments=_args
                 )
-                for _args in options
+                for _args in new_job_args
             ]
             # write jobs to database
-            self.write_job(new_jobs, write_args=True)
+            self.update(new_jobs, status=1)
             # Update this job to "completed"
-            job.set_message(f"Created {len(new_jobs)} jobs with all options")
+            job.set_message(f"Created {len(new_jobs)} new jobs with all options")
             job.update(3)
             return True
 
