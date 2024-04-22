@@ -11,7 +11,7 @@ def wrap_string(_value):
     return _value
 
 
-def _parse_params_from_doc(doc_string):
+def parse_params_from_doc(doc_string):
     _doc_lines = [_.strip() for _ in doc_string.split("\n")]
     params = dict()
     for _line in _doc_lines:
@@ -20,7 +20,7 @@ def _parse_params_from_doc(doc_string):
     return params
 
 
-def _parse_params_from_signature(signature: inspect.Signature):
+def parse_params_from_signature(signature: inspect.Signature):
     params = dict()
     for _name, _param in signature.parameters.items():
 
