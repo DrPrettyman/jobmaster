@@ -11,6 +11,9 @@ class SameParameter:
     def __bool__(self):
         return True
 
+    def __repr__(self):
+        return "same"
+
 
 class Dependency:
     def __init__(self,
@@ -23,15 +26,15 @@ class Dependency:
             _keys = tuple(_task_.split('.'))
             if len(_keys) == 2:
                 self.type_key, self.task_key = _keys
-                self.task_func_repr = None
+                self.task_func_module = None
             else:
                 raise ValueError(f"Invalid task: {_task_}")
         elif isinstance(_task_, Callable):
             self.task_key = _task_.__name__
             self.type_key = None
-            self.task_func_source = re.sub(r'\s+', '', inspect.getsource(_task_))
+            self.task_func_module = _task_.__module__
         else:
-            raise ValueError(f"Invalid task: {_task_}")
+            raise ValueError(f"Invalid task arg: {_task_}")
 
         if _hours_ < 0:
             raise ValueError(f"Dependency time cannot be negative")
@@ -39,6 +42,7 @@ class Dependency:
             _hours_ = 24*30
         self.time = _hours_
 
+        self.all_arguments = kwargs
         args_same = []
         args_specified = []
         for _k, _v in kwargs.items():
@@ -116,7 +120,7 @@ class Task:
             raise ValueError(f"process_limit must be an integer, not {type(process_limit)}")
 
         if not type_key:
-            type_key = function.__module__
+            type_key = function.__module__.split('.')[-1]
 
         if dependencies is None:
             dependencies = []
@@ -129,7 +133,6 @@ class Task:
 
         self.module = function.__module__
         self.absfile = inspect.getabsfile(function)
-        self.task_func_source = re.sub(r'\s+', '', inspect.getsource(function))
 
         self.write_all = write_all
         self.process_limit = process_limit
@@ -142,6 +145,16 @@ class Task:
 
     def __call__(self, *args, **kwargs):
         return self.function(*args, **kwargs)
+
+    def __repr__(self):
+        s = f"- Task: {self.type_key}.{self.key}"
+        if self.dependencies:
+            s += f"\n  Dependencies:"
+            for i, _dep in enumerate(self.dependencies):
+                s += f"\n\t  {i+1}. {_dep.type_key}.{_dep.task_key}("
+                s += ", ".join([f"{_arg}={_val}" if not isinstance(_val, str) else f"{_arg}=\"{_val}\"" for _arg, _val in _dep.all_arguments.items()])
+                s += ")"
+        return s
 
     def _parse_parameters(self):
         _docstring = inspect.getdoc(self.function)
@@ -200,9 +213,6 @@ class Task:
         if self._help is None:
             self._help = self._parse_help()
         return self._help
-
-    def __repr__(self):
-        return f"Task: {self.type_key}.{self.key}"
 
     @property
     def db_dependency_rows(self) -> tuple[list[str], list[str], list[str]]:

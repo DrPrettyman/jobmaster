@@ -137,26 +137,31 @@ class Job:
         self.message = message
 
     @property
+    def status(self):
+        return self._status
+
+    @property
     def status_str(self):
         return _status_lookup[self._status]
 
-    @property
-    def parameters_with_all_value(self):
-        return [_key for _key in self.task.write_all if self.arguments.get(_key) == 'ALL']
-
     def arguments_for_spawned_jobs(self) -> list[dict]:
         options = dict()
-        for _param_key in self.parameters_with_all_value:
+
+        parameters_with_all_value = [
+            _key
+            for _key in self.task.write_all
+            if self.arguments.get(_key) == 'ALL'
+        ]
+
+        for _param_key in parameters_with_all_value:
             _parameter = self.task.parameter_dict.get(_param_key)
             if _parameter is None:
-                self.set_message(f"Parameter {_param_key} not recognised")
-                self.update(4)
+                self.update(status=4, message=f"Parameter {_param_key} not recognised")
                 self.logger.error(f"Parameter {_param_key} not recognised")
                 return []
             _arg_options = _parameter.select_from
             if len(_arg_options) == 0:
-                self.set_message(f"Parameter {_param_key} has no options")
-                self.update(4)
+                self.update(status=4, message=f"Parameter {_param_key} has no options")
                 self.logger.error(f"Parameter {_param_key} has no options")
                 return []
             options[_param_key] = _arg_options
@@ -195,7 +200,15 @@ class Job:
         return queue_row, arg_rows
 
     @property
-    def dependencies_sql_table(self) -> str:
+    def _dependencies_sql_table_simple(self) -> str:
+        selects = [
+            f"SELECT '{_dep.type_key}' AS dependency_type_key, '{_dep.task_key}' AS dependency_task_key "
+            for _dep in self.task.dependencies
+        ]
+        return " UNION ALL ".join(selects)
+
+    @property
+    def _dependencies_sql_table(self) -> str:
         selects = []
         for _dep in self.task.dependencies:
             args = [(_k, _v) for _k, _v in _dep.args_specified]
@@ -209,25 +222,29 @@ class Job:
             arg_array = f"ARRAY[{', '.join(arg_rows)}]"
 
             sql = f"""
-                SELECT  '{self.task.type_key}' AS type_key,
-                        '{self.task.key}' AS task_key,
-                        '{_dep.type_key}' AS dependency_type_key,
-                        '{_dep.task_key}' AS dependency_task_key,
-                        {_dep.time} AS time,
-                        {arg_array} AS arguments                         
-                """
+                    SELECT  '{self.task.type_key}' AS type_key,
+                            '{self.task.key}' AS task_key,
+                            '{_dep.type_key}' AS dependency_type_key,
+                            '{_dep.task_key}' AS dependency_task_key,
+                            {_dep.time} AS dependency_time,
+                            {arg_array} AS arguments
+                    """
             selects.append(sql)
         return " UNION ALL ".join(selects)
 
-    def update(self, status: int, _execute: bool = True) -> TextClause | None:
+    def update(self, status: int, message: str = None, _execute: bool = True) -> TextClause | None:
         """
         Update the status of the job and write to the database.
         If the status is 0 (local), the arguments will also be written to the database,
 
         :param status:
+        :param message:
         :param _execute:
         :return:
         """
+        if message:
+            self.set_message(message)
+
         if status == self._status:
             return
 
@@ -263,6 +280,79 @@ class Job:
             return
         else:
             return sql
+
+    def dependencies_in_queue(self) -> list[dict]:
+        with self._engine.connect() as conn:
+            _result = conn.execute(
+                sqlalchemy.text(
+                    f"""
+                    WITH jobs_table AS (
+                        SELECT *
+                        FROM {self._schema}.current_jobs()
+                        WHERE status_out IN [1,2,3]
+                    ), deps_table AS (
+                        {self._dependencies_sql_table_simple}
+                    )
+
+                    SELECT  dt.dependency_type_key as type_key,
+                            dt.dependency_task_key as task_key,
+                            jt.job_id_out as job_id,
+                            jt.status_out as status,
+                            jt.updated_at_out as updated_at,
+                            jt.arguments_out as arguments
+                    FROM deps_table dt
+                    LEFT JOIN jobs_table jt
+                    ON dt.dependency_type_key = jt.type_key_out
+                    AND dt.dependency_task_key = jt.task_key_out
+                    """
+                )
+            )
+            conn.commit()
+
+        results = [
+            dict(
+                job_id=row.job_id,
+                status=row.status,
+                updated_at=row.updated_at,
+                time=(datetime.datetime.utcnow() - row.updated_at).hours,
+                type_key=row.type_key,
+                task_key=row.task_key,
+                arguments=utils.parse_argument_type(row.arguments)
+            )
+            for row in _result.all()
+        ]
+
+        return results
+
+    def dependencies_specific(self) -> list[dict]:
+        _deps = []
+        for i, _dep in enumerate(self.task.dependencies):
+            _d = dict(
+                type_key=_dep.type_key,
+                task_key=_dep.task_key,
+                time=_dep.time
+            )
+            _args = dict()
+            for _k in _dep.args_same:
+                _args[_k] = self.arguments[_k]
+            for _k, _v in _dep.args_specified:
+                _args[_k] = _v
+            _d['arguments'] = _args
+            _deps.append(_d)
+        return _deps
+
+    def required_dependency_jobs(self):
+        required = []
+        for _dep in self.dependencies_specific():
+            for _qj in self.dependencies_in_queue():
+                if _dep['type_key'] == _qj['type_key'] and _dep['task_key'] == _qj['task_key'] and all((k, v) in _qj['arguments'].items() for k, v in _dep['arguments'].items()):
+                    if _qj['status'] in (1, 2):
+                        continue
+                    elif _qj['status'] == 3 and _qj['time'] < _dep['time']:
+                        continue
+                    else:
+                        required.append(_dep)
+        return required
 
     def safe_execute(self):
         _success = False
@@ -333,28 +423,23 @@ class JobMaster:
     def _validate_dependencies(self):
         task_path_lookup = dict()
         for _type_key, _task_key, _task in self.all_tasks():
-            task_path_lookup[_task.task_func_source] = (_type_key, _task_key)
+            task_path_lookup[_task.module+'.'+_task.key] = (_type_key, _task_key)
 
-        print('\n'+'*' * 20)
-        print('task_path_lookup:')
-        print(task_path_lookup)
-        print('*'*20 + '\n')
+        # print('\n'+'*' * 20)
+        # print('task_path_lookup:')
+        # print(task_path_lookup)
+        # print('*'*20 + '\n')
 
         for _type_key, _task_key, _task in self.all_tasks():
             for _dep in _task.dependencies:
                 if _dep.type_key is None:
-                    print(_dep.task_func_source)
-                    __type, __task = task_path_lookup.get(_dep.task_func_source, (None, None))
-                    print(__type, __task)
+                    __type, __task = task_path_lookup.get(_dep.task_func_module+'.'+_dep.task_key, (None, None))
                     _dep.set_type_key(__type)
                 if not self.get((_dep.type_key, _dep.task_key)):
                     raise ValueError(f"Dependency {_dep.type_key}.{_dep.task_key} for "
                                      f"task {_type_key}.{_task_key} not recognised")
 
         self._dependencies_validated = True
-
-    def check_dependencies(self, job: Job):
-        pass
 
     def get(self, key):
         return self.__getitem__(key)
@@ -368,7 +453,9 @@ class JobMaster:
         if not self._dependencies_validated:
             self._validate_dependencies()
 
-        sql0 = sqlalchemy.text(
+        statements = []
+
+        _sql = sqlalchemy.text(
             f"""
             TRUNCATE {self._schema}.tasks, 
                      {self._schema}.parameters, 
@@ -378,14 +465,21 @@ class JobMaster:
             """
         )
 
+        statements.append(_sql)
+
         task_rows = ["("+_task.db_row+")" for _type_key, _task_key, _task in self.all_tasks()]
-        sql1 = sqlalchemy.text(f"INSERT INTO {self._schema}.tasks \nVALUES \n" + ", \n".join(task_rows) + ";")
+        if len(task_rows) > 0:
+            _sql = sqlalchemy.text(f"INSERT INTO {self._schema}.tasks \nVALUES \n" + ", \n".join(task_rows) + ";")
+            statements.append(_sql)
 
         raw_param_rows = [_task.db_parameter_rows for _type_key, _task_key, _task in self.all_tasks()]
         param_rows = []
         for _l in raw_param_rows:
             param_rows.extend(["("+_r+")" for _r in _l])
-        sql2 = sqlalchemy.text(f"INSERT INTO {self._schema}.parameters \nVALUES \n" + ", \n".join(param_rows) + ";")
+
+        if len(param_rows) > 0:
+            _sql = sqlalchemy.text(f"INSERT INTO {self._schema}.parameters \nVALUES \n" + ", \n".join(param_rows) + ";")
+            statements.append(_sql)
 
         raw_dep_rows = [_task.db_dependency_rows for _type_key, _task_key, _task in self.all_tasks()]
         dep_rows = []
@@ -396,17 +490,19 @@ class JobMaster:
             dep_arg_same_rows.extend(["(" + _r + ")" for _r in _tup[1]])
             dep_arg_specified_rows.extend(["(" + _r + ")" for _r in _tup[2]])
 
-        sql3 = sqlalchemy.text(f"INSERT INTO {self._schema}.dependencies \nVALUES \n" + ", \n".join(dep_rows) + ";")
-        sql4 = sqlalchemy.text(f"INSERT INTO {self._schema}.dependency_args_same \nVALUES \n" + ", \n".join(dep_arg_same_rows) + ";")
-        sql5 = sqlalchemy.text(f"INSERT INTO {self._schema}.dependency_args_specified \nVALUES \n" + ", \n".join(dep_arg_specified_rows) + ";")
+        if len(dep_rows) > 0:
+            _sql = sqlalchemy.text(f"INSERT INTO {self._schema}.dependencies \nVALUES \n" + ", \n".join(dep_rows) + ";")
+            statements.append(_sql)
+        if len(dep_arg_same_rows) > 0:
+            _sql = sqlalchemy.text(f"INSERT INTO {self._schema}.dependency_args_same \nVALUES \n" + ", \n".join(dep_arg_same_rows) + ";")
+            statements.append(_sql)
+        if len(dep_arg_specified_rows) > 0:
+            _sql = sqlalchemy.text(f"INSERT INTO {self._schema}.dependency_args_specified \nVALUES \n" + ", \n".join(dep_arg_specified_rows) + ";")
+            statements.append(_sql)
 
         with self._engine.connect() as conn:
-            conn.execute(sql0)
-            conn.execute(sql1)
-            conn.execute(sql2)
-            conn.execute(sql3)
-            conn.execute(sql4)
-            conn.execute(sql5)
+            for _sql in statements:
+                conn.execute(_sql)
             conn.commit()
 
     def deploy(self, reset: bool = False):
@@ -479,22 +575,19 @@ class JobMaster:
                 conn.execute(sqlalchemy.text(f"INSERT INTO {self._schema}.arguments \nVALUES \n{_arg_values};"))
             conn.commit()
 
-    def current_jobs(self):
-        with self._engine.connect() as conn:
-            return conn.execute(sqlalchemy.text(f"SELECT * FROM {self._schema}.jobs")).fetchall()
+    def execute(self, job: Job) -> Job:
+        # update the job status to "running" if not already
+        job.update(2)
 
-    def execute(self, job: Job):
         # first check "write all" parameters
         new_job_args = job.arguments_for_spawned_jobs()
-
         if len(new_job_args) > 0:
             # create jobs with all combinations of options
-            # with status 1
             new_jobs = [
                 self.job(
                     type_key=job.task.type_key,
                     task_key=job.task.key,
-                    priority=job.priority + 1,
+                    priority=job.priority,
                     arguments=_args
                 )
                 for _args in new_job_args
@@ -502,12 +595,32 @@ class JobMaster:
             # write jobs to database
             self.update(new_jobs, status=1)
             # Update this job to "completed"
-            job.set_message(f"Created {len(new_jobs)} new jobs with all options")
-            job.update(3)
-            return True
+            job.update(status=3, message=f"Created {len(new_jobs)} new jobs with all options")
+
+        if job.status != 2:
+            return job
 
         # then check dependencies
-        # TODO: fill in this part!
+        new_job_specs = job.required_dependency_jobs()
+        if len(new_job_args) > 0:
+            # create jobs to satisfy dependencies with higher priority
+            new_jobs = [
+                self.job(
+                    type_key=_nj['type_key'],
+                    task_key=_nj['task.key'],
+                    priority=job.priority + 1,
+                    arguments=_nj['arguments']
+                )
+                for _nj in new_job_specs
+            ]
+            # write jobs to database
+            self.update(new_jobs, status=1)
+            # Update this job to "waiting"
+            job.update(status=1, message=f"Back in queue. Created {len(new_jobs)} new jobs to satisfy dependencies")
+
+        if job.status != 2:
+            return job
 
         # execute job
         job.safe_execute()
+        return job

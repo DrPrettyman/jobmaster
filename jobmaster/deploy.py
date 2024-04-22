@@ -1,10 +1,12 @@
 import sqlalchemy
+import pg8000
 
 
 def deploy(db_engine: sqlalchemy.engine.base.Engine, schema: str, reset: bool = False):
     if reset:
         _kill(db_engine, schema)
     _create_schema(db_engine, schema)
+    _create_functions(db_engine, schema)
     _create_tables(db_engine, schema)
     _create_functions(db_engine, schema)
 
@@ -13,6 +15,31 @@ def _create_schema(db_engine: sqlalchemy.engine.base.Engine, schema: str):
     with db_engine.connect() as conn:
         conn.execute(sqlalchemy.schema.CreateSchema(schema, if_not_exists=True))
         conn.commit()
+
+
+def _create_types(db_engine: sqlalchemy.engine.base.Engine, schema: str):
+    # Arguments
+    try:
+        with db_engine.connect() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    f"""
+                            CREATE TABLE IF NOT EXISTS {schema}.arguments (
+                                job_id      uuid NOT NULL,
+                                arg_key     text,
+                                arg_value   json
+                            );
+        
+                            CREATE TYPE jobmaster_argument AS (
+                                arg_key     text,
+                                arg_value   json
+                            );
+                            """
+                )
+            )
+            conn.commit()
+    except pg8000.exceptions.DatabaseError as e:
+        pass
 
 
 def _create_tables(db_engine: sqlalchemy.engine.base.Engine, schema: str):
@@ -112,11 +139,6 @@ def _create_tables(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                     arg_key     text,
                     arg_value   json
                 );
-                
-                CREATE TYPE jobmaster_argument AS (
-                    arg_key     text,
-                    arg_value   json
-                );
                 """
             )
         )
@@ -142,7 +164,7 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
         conn.execute(
             sqlalchemy.text(
                 f"""    
-                CREATE OR REPLACE {schema}.current_jobs () 
+                CREATE OR REPLACE FUNCTION {schema}.current_jobs () 
                 RETURNS TABLE (
                     job_id_out uuid,
                     type_key_out text,
@@ -205,8 +227,8 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
 
 def _kill(db_engine: sqlalchemy.engine.base.Engine, schema: str):
     with db_engine.connect() as conn:
-        conn.execute(sqlalchemy.text(f"DROP TYPE IF EXISTS argument;"))
         conn.execute(sqlalchemy.text(f"DROP SCHEMA IF EXISTS {schema} CASCADE;"))
+        conn.execute(sqlalchemy.text(f"DROP TYPE IF EXISTS argument CASCADE;"))
         conn.commit()
 
 
