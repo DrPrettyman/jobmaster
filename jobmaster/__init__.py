@@ -349,7 +349,7 @@ class JobMaster:
                     created_at=top_job_out.created_at_out,
                     arguments=top_job_out.arguments_out
                 )
-                sql = new_job.update(status=2, _execute=False)
+                sql = new_job.update(status=2, message="Popped from queue", _execute=False)
                 conn.execute(sql)
             conn.commit()
         return new_job

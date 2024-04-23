@@ -398,7 +398,14 @@ class Job:
     def active(self):
         return self._status in (0, 1, 2)
 
-    def set_message(self, message: str, _message_level: str = 'debug'):
+    def set_message(self, message: str, _message_level: str = 'debug', _status: int = None):
+        if _status is None:
+            _status_str = self.status_str
+        else:
+            _status_str = _status_lookup.get(_status)
+
+        message = f"[{_status_str}] {message}"
+
         if _message_level == 'debug':
             self.logger.debug(f"Job {self.job_id}: {message}")
         elif _message_level == 'info':
@@ -523,14 +530,15 @@ class Job:
         :param _message_level:
         :return:
         """
-        if message:
-            self.set_message(message, _message_level=_message_level)
-
-        if status == self._status:
-            return
 
         if status not in _status_lookup.keys():
             raise ValueError(f"Invalid status: {status}")
+
+        if message:
+            self.set_message(message, _message_level=_message_level, _status=status)
+
+        if status == self._status:
+            return
 
         if self._status == 0:
             write_args = True
