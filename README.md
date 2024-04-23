@@ -12,22 +12,30 @@ Not yet publised on pip.
 Any function in your project can become a JobMaster Task by using the `@task` decorator.
 For example, you may have a function like this:
 ```python
-# module my_tasks.py
+# jmtests/awesome_things/things1.py
 
 from jobmaster import task
 
 @task
-def task1(file_path: str, a: int, b: int):
+def foo(file_path: str, number: [1, 2, 3]):
+    """
+    Write a number to a file.
+
+    :param file_path: the file to write to
+    :param number: the number to write
+    """
     with open(file_path, 'w') as f:
-        f.write(str(a + b))
+        f.write(str(number))
 ```
 Think of "tasks" as functions and "jobs" as instances of those functions with specific arguments.
 
-Once you have properly configured JobMaster, this task will be registered with "type key" `my_tasks` (the name of the module) and "task key" `task1` (the name of the function). 
+Once you have properly configured JobMaster, this task will be registered with 
+- `type_key='things1'` (the name of the module) 
+- `task_key='foo'` (the name of the function)
 
 You can add a job to the queue by calling the procedure
 ```postgresql
-call jobmaster.insert_job('my_tasks', 'task1', 10, '{"file_path": "/tmp/sum.txt", "a": 1, "b": 2}'::json)
+call jobmaster.insert_job('things1', 'foo', 10, '{"file_path": "/tmp/sum.txt", "number": 2}'::json)
 ```
 from wherever you have a connection to your database: from a different python script, from a web application, etc..
 `jobmaster.insert_job` takes 4 arguments:
@@ -39,21 +47,24 @@ from wherever you have a connection to your database: from a different python sc
 Somewhere in your python project, you will have a script that pops jobs from the queue and executes them:
 
 ```python
-# module run.py
-
+# jmtests/__init__.py
 import sqlalchemy
+
+db_engine = sqlalchemy.create_engine("postgresql+pg8000://", ...)
+```
+
+```python
+# jmtests/utils/jmutils.py
+
 from jobmaster import JobMaster
+from .. import db_engine
+from '<any module with tasks>' import *
 
-# Create a SQLAlchemy engine for your PostgreSQL database
-my_database_engine = sqlalchemy.create_engine("postgresql+pg8000://", ...)
+jobmaster = JobMaster(db_engine=db_engine, _validate_dependencies=True)
 
-# Create a JobMaster instance
-jobmaster = JobMaster(db_engine=my_database_engine)
-
-# Run the next job in the queue
-job = jobmaster.pop_job()
-if job:
-    job.execute()
+# Run jobs from the queue until the queue is empty
+if __name__ == '__main__':
+    jobs = jobmaster.run()
 ```
 This could be run in a loop, or in a cron job, or in a web server, etc..
 
