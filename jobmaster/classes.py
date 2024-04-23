@@ -30,11 +30,25 @@ class SameParameter:
 
 
 class Dependency:
+    """
+    A class to represent a dependency between two tasks.
+
+    The dependency is defined by the task, the time since the task was completed, and any specific arguments.
+    """
     def __init__(self,
                  _task_: str | Callable,
-                 _hours_: float = 0.0,
+                 _hours_: float = None,
                  **kwargs
                  ):
+        """
+        Create a new dependency object.
+
+        :param _task_:  Either a string in the format 'type.task' or a callable function.
+        :param _hours_: Hours since the task was completed. This cannot be less than 2 minutes or more than 30 days.
+                        If a value less than 2 minutes is provided, it will be set to 2 minutes.
+                        If a value more than 30 days is provided, it will be set to 30 days.
+        :param kwargs:  Any specific arguments required for the task.
+        """
 
         if isinstance(_task_, str):
             _keys = tuple(_task_.split('.'))
@@ -50,10 +64,12 @@ class Dependency:
         else:
             raise ValueError(f"Invalid task arg: {_task_}")
 
-        if _hours_ < 0:
-            raise ValueError(f"Dependency time cannot be negative")
-        if _hours_ == 0:
+        if not _hours_:
             _hours_ = 24*30
+        if _hours_ > 24*30:
+            _hours_ = 24*30
+        if _hours_ < 2/60:
+            _hours_ = 2/60
         self.time = _hours_
 
         self.all_arguments = kwargs
@@ -162,15 +178,29 @@ class Task:
 
     def __repr__(self):
         s = f"- Task: {self.type_key}.{self.key}"
+        if self.process_limit:
+            s += f"\n  Process limit: {self.process_limit}"
+        if self.parameters:
+            s += f"\n  Parameters:"
+            for i, _param in enumerate(self.parameters):
+                s += f"\n\t  {i+1}. {_param.name}: {_param.value_type} ({_param.help})"
         if self.dependencies:
             s += f"\n  Dependencies:"
             for i, _dep in enumerate(self.dependencies):
+                _args = ", ".join(
+                    [
+                        f"{_arg}={_val}"
+                        if not isinstance(_val, str)
+                        else f"{_arg}=\"{_val}\""
+                        for _arg, _val in _dep.all_arguments.items()
+                    ]
+                )
                 s += f"\n\t  {i+1}. {_dep.type_key}.{_dep.task_key}("
-                s += ", ".join([f"{_arg}={_val}" if not isinstance(_val, str) else f"{_arg}=\"{_val}\"" for _arg, _val in _dep.all_arguments.items()])
+                s += _args
                 s += ")"
         return s
 
-    def _parse_parameters(self):
+    def _parse_parameters(self) -> list[Parameter]:
         _docstring = inspect.getdoc(self.function)
         _signature = inspect.signature(self.function)
 
@@ -187,8 +217,8 @@ class Task:
                     if not _param.get(_k):
                         _param[_k] = _v
 
-            if _param.get('help') is None:
-                _param['help'] = "No documentation for parameter"
+            if _param.get('help_str') is None:
+                _param['help_str'] = "No documentation for parameter"
 
             if _arg_name in self.write_all and isinstance(_param.get('select_from'), list):
                 _param['write_all'] = True
@@ -201,7 +231,7 @@ class Task:
 
         return parameters
 
-    def _parse_help(self):
+    def _parse_help(self) -> str:
         doc = inspect.getdoc(self.function)
         if not doc:
             return "No docstring provided"
@@ -283,7 +313,8 @@ class Job:
                  job_id: str = None,
                  created_at: datetime.datetime = None,
                  collect_id: str = None,
-                 message: str = None):
+                 message: str = None,
+                 fill_args: bool = False):
 
         if job_id is None:
             job_id = uuid4().hex
@@ -317,14 +348,68 @@ class Job:
         self.collect_id = collect_id
         self.message = message
 
+        # fill in required arguments
+        if fill_args:
+            for _param in self.task.parameters:
+                if not _param.required:
+                    continue  # If the argument is not required, we don't need to fill it
+                if _param.name not in self.arguments.keys():
+                    if _param.default_value is not None:
+                        self.arguments[_param.name] = _param.default_value
+                        self.logger.debug(f"Required argument `{_param.name}` not provided. "
+                                          f"Assigned default value `{_param.default_value}` ({type(_param.default_value)}).")
+                    elif _param.value_type == 'NoneType':
+                        self.arguments[_param.name] = None
+                        self.logger.debug(f"Required argument `{_param.name}` not provided. "
+                                          f"Assigned value `None`.")
+                    elif _param.select_from:
+                        self.arguments[_param.name] = _param.select_from[0]
+                        self.logger.debug(f"Required argument `{_param.name}` not provided. "
+                                          f"Assigned value `{_param.select_from[0]}` ({type(_param.select_from[0])}).")
+                    else:
+                        self.logger.error(f"Argument `{_param.name}` is required but not provided")
+
+        self.logger.info(f"Initialised local Job instance with ID: {self.job_id}")
+
     def __bool__(self):
         return True
+
+    def __repr__(self):
+        args = ", ".join(
+            [f"{_arg}={_val}"
+             if not isinstance(_val, str)
+             else f"{_arg}=\"{_val}\"" for _arg, _val
+             in self.arguments.items()]
+        )
+        lines = [
+            f"Job ID:    {self.job_id}"
+            f"\nSignature: {self.task.type_key}.{self.task.key}({args})"
+            f"\nStatus:    {self.status_str}"
+        ]
+        if self.message:
+            lines.append(f"\nMessage:   {self.message}")
+
+        return "".join(lines)
+
+    def __str__(self):
+        return self.__repr__()
 
     @property
     def active(self):
         return self._status in (0, 1, 2)
 
-    def set_message(self, message: str):
+    def set_message(self, message: str, _message_level: str = 'debug'):
+        if _message_level == 'debug':
+            self.logger.debug(f"Job {self.job_id}: {message}")
+        elif _message_level == 'info':
+            self.logger.info(f"Job {self.job_id}: {message}")
+        elif _message_level == 'warning':
+            self.logger.warning(f"Job {self.job_id}: {message}")
+        elif _message_level == 'error':
+            self.logger.error(f"Job {self.job_id}: {message}")
+        elif _message_level == 'critical':
+            self.logger.critical(f"Job {self.job_id}: {message}")
+
         self.message = message
 
     @property
@@ -423,7 +508,11 @@ class Job:
             selects.append(sql)
         return " UNION ALL ".join(selects)
 
-    def update(self, status: int, message: str = None, _execute: bool = True) -> TextClause | None:
+    def update(self,
+               status: int,
+               message: str = None,
+               _execute: bool = True,
+               _message_level: str = 'debug') -> TextClause | None:
         """
         Update the status of the job and write to the database.
         If the status is 0 (local), the arguments will also be written to the database,
@@ -431,10 +520,11 @@ class Job:
         :param status:
         :param message:
         :param _execute:
+        :param _message_level:
         :return:
         """
         if message:
-            self.set_message(message)
+            self.set_message(message, _message_level=_message_level)
 
         if status == self._status:
             return
@@ -448,6 +538,7 @@ class Job:
             write_args = False
 
         self._status = status
+        self.logger.debug(f"Job {self.job_id} status set: {self.status_str}")
 
         queue_row, arg_rows = self._db_rows
 
@@ -480,7 +571,7 @@ class Job:
                     WITH jobs_table AS (
                         SELECT *
                         FROM {self._schema}.current_jobs()
-                        WHERE status_out IN [1,2,3]
+                        WHERE status_out IN (1,2,3)
                     ), deps_table AS (
                         {self._dependencies_sql_table_simple}
                     )
@@ -492,26 +583,29 @@ class Job:
                             jt.updated_at_out as updated_at,
                             jt.arguments_out as arguments
                     FROM deps_table dt
-                    LEFT JOIN jobs_table jt
+                    INNER JOIN jobs_table jt
                     ON dt.dependency_type_key = jt.type_key_out
                     AND dt.dependency_task_key = jt.task_key_out
                     """
                 )
             )
             conn.commit()
-
-        results = [
-            dict(
-                job_id=row.job_id,
-                status=row.status,
-                updated_at=row.updated_at,
-                time=(datetime.datetime.utcnow() - row.updated_at).hours,
-                type_key=row.type_key,
-                task_key=row.task_key,
-                arguments=utils.parse_argument_type(row.arguments)
-            )
-            for row in _result.all()
-        ]
+        rows = _result.all()
+        self.logger.debug(f"Dependencies in queue: {len(rows)}")
+        if len(rows) > 0:
+            results = [
+                dict(
+                    job_id=row.job_id,
+                    status=row.status,
+                    updated_at=row.updated_at,
+                    type_key=row.type_key,
+                    task_key=row.task_key,
+                    arguments=utils.parse_argument_type(row.arguments)
+                )
+                for row in rows
+            ]
+        else:
+            results = []
 
         return results
 
@@ -535,25 +629,31 @@ class Job:
     def required_dependency_jobs(self):
         required = []
         for _dep in self.dependencies_specific():
+            _dep_is_required = True
             for _qj in self.dependencies_in_queue():
                 if _dep['type_key'] == _qj['type_key'] and _dep['task_key'] == _qj['task_key'] and all(
                         (k, v) in _qj['arguments'].items() for k, v in _dep['arguments'].items()):
                     if _qj['status'] in (1, 2):
-                        continue
-                    elif _qj['status'] == 3 and _qj['time'] < _dep['time']:
-                        continue
-                    else:
-                        required.append(_dep)
+                        # If the job is already in the queue (waiting/running), it is not required
+                        _dep_is_required = False
+                    elif _qj['status'] == 3:
+                        # If the job is complete, check if it was completed within the required time
+                        time_since_complete = (datetime.datetime.utcnow() - _qj['updated_at']).total_seconds() / 3600
+                        if time_since_complete < _dep['time']:
+                            # If the job was completed within the required time, it is not required
+                            _dep_is_required = False
+            if _dep_is_required:
+                required.append(_dep)
+        self.logger.debug(f"Required dependencies: {len(required)}")
         return required
 
     def safe_execute(self):
+        self.logger.debug(f"Executing job {self.job_id}")
         _success = False
         try:
             result = self.task.function(**self.arguments)
-            self.message = f"Executed at {datetime.datetime.utcnow()} with result: {str(result)}"
-            self.update(3)
+            self.update(status=3, message=f"Executed at {datetime.datetime.utcnow()} with result: {str(result)}")
             _success = True
         except Exception as _error:
-            self.message = f"Error at {datetime.datetime.utcnow()}: {_error}"
-            self.update(4)
+            self.update(status=4, message=f"Error at {datetime.datetime.utcnow()}: {_error}", _message_level='error')
         return _success

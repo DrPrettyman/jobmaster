@@ -71,12 +71,13 @@ class JobMaster:
                  db_engine: sqlalchemy.engine.base.Engine,
                  schema: str = 'jobmaster',
                  cmd_id: str = None,
-                 logger=None):
+                 logger=None,
+                 _validate_dependencies: bool = False):
 
         if logger is None:
-            self.logger = utils.NothingLogger
+            self.logger = utils.NothingLogger()
         elif logger == print:
-            self.logger = utils.StdLogger
+            self.logger = utils.StdLogger()
         elif all(hasattr(logger, _attr) for _attr in ('debug', 'info', 'warning', 'error', 'critical')):
             self.logger = logger
         else:
@@ -87,6 +88,9 @@ class JobMaster:
         self._cmd_id = cmd_id or datetime.datetime.utcnow().isoformat()
 
         self._dependencies_validated: bool = False
+
+        if _validate_dependencies:
+            self._validate_dependencies()
 
     @property
     def cmd_id(self):
@@ -142,6 +146,11 @@ class JobMaster:
 
     def get(self, key):
         return self.__getitem__(key)
+
+    def print_tasks(self):
+        for _type_key, _task_key, _task in self.all_tasks():
+            print(_task)
+            print('')
 
     def write_tasks(self):
         """
@@ -217,6 +226,9 @@ class JobMaster:
             self._validate_dependencies()
 
         deploy(self._engine, self._schema, reset=reset)
+        if reset:
+            self.logger.info("Reset JobMaster database")
+        self.logger.info("Deployed JobMaster database")
         self.write_tasks()
 
     def job(self,
@@ -228,7 +240,9 @@ class JobMaster:
             job_id: str = None,
             created_at: datetime.datetime = None,
             collect_id: str = None,
-            message: str = None):
+            message: str = None,
+            fill_args: bool = False
+            ) -> Job:
 
         _task = self.get((type_key, task_key))
         if not _task:
@@ -248,8 +262,47 @@ class JobMaster:
             created_at=created_at,
             collect_id=collect_id,
             message=message,
-            logger=self.logger
+            logger=self.logger,
+            fill_args=fill_args
         )
+
+    def jobs_in_queue(self) -> list[Job]:
+        """
+        Simply returns all jobs in the queue, ordered by "updated_at" time.
+
+        :return:
+        """
+        with self._engine.connect() as conn:
+            _result = conn.execute(
+                sqlalchemy.text(
+                    f"SELECT * "
+                    f"FROM {self._schema}.current_jobs() "
+                    f"ORDER BY updated_at_out DESC "
+                )
+            )
+            conn.commit()
+
+        results = _result.all()
+
+        if len(results) == 0:
+            self.logger.info("No jobs in queue")
+            return []
+
+        self.logger.info(f"{len(results)} jobs in queue")
+        _out = [
+            self.job(
+                job_id=_r.job_id_out,
+                type_key=_r.type_key_out,
+                task_key=_r.task_key_out,
+                status=_r.status_out,
+                priority=_r.priority_out,
+                created_at=_r.created_at_out,
+                arguments=_r.arguments_out
+            )
+            for _r in results
+        ]
+
+        return _out
 
     def queue_pop(self) -> Job:
         """
@@ -281,8 +334,7 @@ class JobMaster:
                 new_job = None
             else:
                 top_job_out = results[0]
-                print("Found a job to run:")
-                print(top_job_out)
+                self.logger.info(f"Found a job to run: {top_job_out.job_id_out}")
                 new_job = self.job(
                     job_id=top_job_out.job_id_out,
                     collect_id=collect_id,
@@ -298,14 +350,16 @@ class JobMaster:
             conn.commit()
         return new_job
 
-    def update(self, jobs: Job | list[Job], status: int):
+    def update(self, jobs: Job | list[Job], status: int, message: str = None, _message_level: str = 'debug'):
         """
         Performs the same function as Job.update(), but for potentially multiple jobs.
         If the status of a job is 0 (local), the arguments will be written to the database,
         otherwise only the job status will be updated.
         
         :param jobs: a Job or list of Jobs
-        :param status: The status to update to
+        :param status: The status to update to - this will be the same for all if updating multiple jobs
+        :param message: A message to write to the database - this will be the same for all if updating multiple jobs
+        :param _message_level: The logging level to use for the message
         :return: 
         """
         
@@ -316,7 +370,7 @@ class JobMaster:
         arg_rows = []
         for _j in jobs:
             _old_status = _j.status
-            _j.update(status, _execute=False)
+            _j.update(status=status, message=message, _execute=False, _message_level=_message_level)
             _q, _a = _j._db_rows
             queue_rows.append(_q)
             if _old_status == 0:
@@ -358,7 +412,7 @@ class JobMaster:
                 for _args in new_job_args
             ]
             # write jobs to database
-            self.update(new_jobs, status=1)
+            self.update(new_jobs, status=1, message=f"Batch-spawned from job {job.job_id}")
             # Update this job to "completed"
             job.update(status=3, message=f"Created {len(new_jobs)} new jobs with all options")
 
@@ -367,23 +421,26 @@ class JobMaster:
 
         # then check dependencies
         new_job_specs = job.required_dependency_jobs()
-        if len(new_job_args) > 0:
+        if len(new_job_specs) > 0:
+            self.logger.debug(f"Creating {len(new_job_specs)} new jobs to satisfy dependencies")
             # create jobs to satisfy dependencies with higher priority
             new_jobs = [
                 self.job(
                     type_key=_nj['type_key'],
-                    task_key=_nj['task.key'],
+                    task_key=_nj['task_key'],
                     priority=job.priority + 1,
-                    arguments=_nj['arguments']
+                    arguments=_nj['arguments'],
+                    fill_args=True
                 )
                 for _nj in new_job_specs
             ]
             # write jobs to database
-            self.update(new_jobs, status=1)
-            # Update this job to "waiting"
+            self.update(new_jobs, status=1, message=f"Created to satisfy dependencies of job {job.job_id}")
+            # Update this job back to "waiting"
             job.update(status=1, message=f"Back in queue. Created {len(new_jobs)} new jobs to satisfy dependencies")
 
         if job.status != 2:
+            self.logger.debug(f"Job {job.job_id} not ready to execute")
             return job
 
         # execute job

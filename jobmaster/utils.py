@@ -7,16 +7,18 @@ import types
 
 def wrap_string(_value):
     if isinstance(_value, str):
-        return f"'{_value}'"
+        return f'"{_value}"'
     return _value
 
 
 def parse_params_from_doc(doc_string):
+    if doc_string is None:
+        return dict()
     _doc_lines = [_.strip() for _ in doc_string.split("\n")]
     params = dict()
     for _line in _doc_lines:
         if m := re.match(r":param (\w+): (.*)", _line):
-            params[m.group(1)] = dict(help=m.group(2))
+            params[m.group(1)] = dict(help_str=m.group(2))
     return params
 
 

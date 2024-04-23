@@ -3,9 +3,6 @@ import sys
 import sqlalchemy
 from google.cloud.sql.connector import Connector, IPTypes
 
-# sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from jobmaster import JobMaster
-
 # Cloud SQL instance configuration
 # Initializes a connection pool for a Cloud SQL instance of Postgres.
 # Uses the Cloud SQL Python Connector package.
@@ -27,5 +24,3 @@ def get_conn():
 
 # The Cloud SQL Python Connector can be used with SQLAlchemy using the 'creator' argument to 'create_engine'
 db_engine = sqlalchemy.create_engine("postgresql+pg8000://", creator=get_conn)
-
-jobmaster = JobMaster(db_engine, logger=print)
