@@ -138,7 +138,7 @@ class Task:
                  function,
                  write_all: str | list[str] = None,
                  type_key: str = None,
-                 process_limit: int = None,
+                 process_units: int = 1,
                  dependencies: list[Dependency] = None):
 
         if isinstance(write_all, str):
@@ -146,8 +146,10 @@ class Task:
         if write_all is None:
             write_all = []
 
-        if process_limit is not None and not isinstance(process_limit, int):
-            raise ValueError(f"process_limit must be an integer, not {type(process_limit)}")
+        assert callable(function), f"function must be callable, not {type(function)}"
+        assert isinstance(write_all, list), f"write_all must be a list, not {type(write_all)}"
+        assert all(isinstance(_, str) for _ in write_all), f"write_all must be a list of strings, not {write_all}"
+        assert isinstance(process_units, int), f"process_units must be an integer, not {type(process_units)}"
 
         if not type_key:
             type_key = function.__module__.split('.')[-1]
@@ -165,7 +167,7 @@ class Task:
         self.absfile = inspect.getabsfile(function)
 
         self.write_all = write_all
-        self.process_limit = process_limit
+        self.process_units = process_units
 
         self._parameters = None
         self._help = None
@@ -178,8 +180,8 @@ class Task:
 
     def __repr__(self):
         s = f"- Task: {self.type_key}.{self.key}"
-        if self.process_limit:
-            s += f"\n  Process limit: {self.process_limit}"
+        if self.process_units:
+            s += f"\n  Process units: {self.process_units}"
         if self.parameters:
             s += f"\n  Parameters:"
             for i, _param in enumerate(self.parameters):
@@ -285,17 +287,12 @@ class Task:
 
     @property
     def db_row(self) -> str:
-        if self.process_limit is None:
-            _process_limit = "NULL"
-        else:
-            _process_limit = self.process_limit
-
         if not self.write_all:
             _write_all = "NULL"
         else:
             _write_all = f"ARRAY['{', '.join(self.write_all)}']"
 
-        return f"'{self.type_key}', '{self.key}', '{self.help}', {_process_limit}, {_write_all}"
+        return f"'{self.type_key}', '{self.key}', '{self.help}', {self.process_units}, {_write_all}"
 
 
 class Job:

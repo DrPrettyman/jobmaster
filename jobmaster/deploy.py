@@ -58,7 +58,7 @@ def _create_tables(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                     type_key        text NOT NULL,
                     task_key        text NOT NULL,
                     help            text,
-                    process_limit   integer,
+                    process_units   integer,
                     write_all       text ARRAY
                 );
                 
@@ -173,7 +173,10 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                     priority_out integer,
                     created_at_out timestamp,
                     updated_at_out timestamp,
-                    arguments_out jobmaster_argument ARRAY
+                    arguments_out jobmaster_argument ARRAY,
+                    system_node_name_out text,
+                    system_pid_out integer,
+                    cmd_id_out text
                 ) 
                 language plpgsql
                 AS $$
@@ -189,6 +192,9 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                                     j1.task_key,
                                     j1.status,
                                     j1.priority,
+                                    j1.system_node_name,
+                                    j1.system_pid,
+                                    j1.cmd_id,
                                     most_recent.created_at,
                                     most_recent.updated_at
                             FROM    {schema}.jobs j1
@@ -211,7 +217,10 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                                 all_jobs.priority,
                                 all_jobs.created_at,
                                 all_jobs.updated_at,
-                                args1.args
+                                args1.args,
+                                all_jobs.system_node_name,
+                                all_jobs.system_pid,
+                                all_jobs.cmd_id
                         FROM    all_jobs
                         LEFT JOIN args1
                         ON      all_jobs.job_id = args1.job_id

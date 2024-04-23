@@ -30,9 +30,9 @@ def _get_task(type_key: str, job_key: str) -> Task | None:
 
 
 def task(_func=None, *,
+         process_units: int = 1,
          write_all: str | list[str] = None,
          type_key: str = None,
-         process_limit: int = None,
          dependencies: Dependency | list[Dependency] = None
          ):
 
@@ -46,7 +46,7 @@ def task(_func=None, *,
             func,
             write_all=write_all,
             type_key=type_key,
-            process_limit=process_limit,
+            process_units=process_units,
             dependencies=dependencies
         )
         entry = __JOB_MASTER_TASKS__.get(_task.type_key, {}).get(_task.key)
@@ -75,6 +75,7 @@ class JobMaster:
                  db_engine: sqlalchemy.engine.base.Engine,
                  schema: str = 'jobmaster',
                  cmd_id: str = None,
+                 system_process_units: int = 100_000,
                  logger=None,
                  _validate_dependencies: bool = False):
 
@@ -90,6 +91,7 @@ class JobMaster:
         self._engine = db_engine
         self._schema = schema
         self._cmd_id = cmd_id or datetime.datetime.utcnow().isoformat()
+        self._system_process_units = system_process_units
 
         self._dependencies_validated: bool = False
 
@@ -99,6 +101,10 @@ class JobMaster:
     @property
     def cmd_id(self):
         return self._cmd_id
+
+    @property
+    def system_process_units(self):
+        return self._system_process_units
 
     def __getitem__(self, key: str | tuple[str, str]):
         if isinstance(key, str):
@@ -308,12 +314,44 @@ class JobMaster:
 
         return _out
 
-    def queue_pop(self) -> Job:
+    def available_process_units(self) -> int:
+        with self._engine.connect() as conn:
+            _processes_result = conn.execute(
+                sqlalchemy.text(
+                    f"WITH running_jobs AS ("
+                    f"  SELECT type_key_out, task_key_out "
+                    f"  FROM {self._schema}.current_jobs() "
+                    f"  WHERE status_out = 2 "
+                    f"  AND system_node_name_out = '{__SYSTEM_NODE_NAME__}' "
+                    f") "
+                    f"SELECT SUM(tsk.process_units) AS total_process_units "
+                    f"FROM running_jobs "
+                    f"LEFT JOIN {self._schema}.tasks tsk "
+                    f"ON running_jobs.type_key_out = tsk.type_key "
+                    f"AND running_jobs.task_key_out = tsk.task_key; "
+                )
+            )
+            conn.commit()
+
+        _ = _processes_result.all()
+        _process_units_in_use = None
+        if len(_) > 0:
+            _process_units_in_use = _[0].total_process_units
+        if _process_units_in_use is None:
+            _process_units_in_use = 0
+        return self._system_process_units - _process_units_in_use
+
+    def queue_pop(self) -> Job | None:
         """
         Pop the top job from the queue and return it as a Job object.
         """
         if not self._dependencies_validated:
             self._validate_dependencies()
+
+        available_process_units = self.available_process_units()
+        if available_process_units <= 0:
+            self.logger.info("No available process units")
+            return None
 
         collect_id: str = str(uuid.uuid4())
         with self._engine.connect() as conn:
@@ -323,18 +361,42 @@ class JobMaster:
                     f"INSERT INTO {self._schema}.collect_ids (collect_id) VALUES ('{collect_id}');"
                 )
             )
+
             _result = conn.execute(
                 sqlalchemy.text(
-                    f"SELECT * "
-                    f"FROM {self._schema}.current_jobs() "
-                    f"WHERE status_out = 1 "
-                    f"ORDER BY priority_out DESC, created_at_out ASC "
-                    f"LIMIT 1; "
+                    f"""
+                    WITH waiting_jobs AS (
+                        SELECT    job_id_out,
+                                  type_key_out, 
+                                  task_key_out, 
+                                  status_out, 
+                                  priority_out, 
+                                  created_at_out, 
+                                  arguments_out 
+                        FROM {self._schema}.current_jobs() 
+                        WHERE status_out = 1 
+                    ) 
+                    SELECT  wj.job_id_out,
+                            wj.type_key_out, 
+                            wj.task_key_out, 
+                            wj.status_out, 
+                            wj.priority_out, 
+                            wj.created_at_out, 
+                            wj.arguments_out,
+                            tsk.process_units 
+                    FROM waiting_jobs wj 
+                    LEFT JOIN {self._schema}.tasks tsk 
+                    ON wj.type_key_out = tsk.type_key 
+                    AND wj.task_key_out = tsk.task_key 
+                    WHERE tsk.process_units <= {available_process_units}
+                    ORDER BY priority_out DESC, created_at_out ASC 
+                    LIMIT 1; 
+                    """
                 )
             )
             results = _result.all()
             if len(results) == 0:
-                self.logger.info("No jobs to run")
+                self.logger.info("Queue is empty. No jobs to run.")
                 new_job = None
             else:
                 top_job_out = results[0]
@@ -468,7 +530,7 @@ class JobMaster:
                 break
             _j = self.execute(job)
             jobs.append(_j)
-        self.logger.info(f"Ran {len(jobs)} jobs. Queue is empty")
+        self.logger.info(f"Ran {len(jobs)} jobs.")
         return jobs
 
     def __call__(self) -> list[Job]:
