@@ -232,7 +232,7 @@ When a JobMaster object is initialised, the number of process units available on
 ```python
 jobmaster = JobMaster(db_engine=my_database_engine, system_process_units=1_000)
 ```
-The default value is 100,000 if this argument is not specified.
+If this argument is not specified, JobMaster will check the environment variable `JOBMASTER_SYSTEM_PROCESS_UNITS` for the number of process units available. If this is not set, or is not formatted like an integer, it will default to 10,000.
 
 You can then specify the number of process units a task requires by passing an integer to the `process_units` argument of the `@task` decorator. If this argument is not specified, the task will require 1 process unit by default.
 

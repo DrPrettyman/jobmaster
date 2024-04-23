@@ -75,7 +75,7 @@ class JobMaster:
                  db_engine: sqlalchemy.engine.base.Engine,
                  schema: str = 'jobmaster',
                  cmd_id: str = None,
-                 system_process_units: int = 100_000,
+                 system_process_units: int = None,
                  logger=None,
                  _validate_dependencies: bool = False):
 
@@ -91,6 +91,16 @@ class JobMaster:
         self._engine = db_engine
         self._schema = schema
         self._cmd_id = cmd_id or datetime.datetime.utcnow().isoformat()
+
+        if system_process_units is None:
+            _ = os.environ.get('JOBMASTER_SYSTEM_PROCESS_UNITS', '10_000')
+            try:
+                system_process_units = int(_)
+            except ValueError:
+                system_process_units = 10_000
+
+        assert isinstance(system_process_units, int), "system_process_units must be an integer"
+
         self._system_process_units = system_process_units
 
         self._dependencies_validated: bool = False
