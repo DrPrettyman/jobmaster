@@ -1,3 +1,7 @@
+__version__ = "0.1.0"
+__author__ = 'Joshua Prettyman'
+__credits__ = 'Blink SEO'
+
 import functools
 import datetime
 import os
