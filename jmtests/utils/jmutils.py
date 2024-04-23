@@ -1,3 +1,4 @@
+import os
 from jobmaster import JobMaster
 from .. import db_engine
 
@@ -6,4 +7,9 @@ from .. import db_engine
 # it's safe and convenient just to do it here.
 from ..awesome_things import *
 
-jobmaster = JobMaster(db_engine, logger=print, _validate_dependencies=True)
+jobmaster = JobMaster(
+    db_engine,
+    schema=os.environ.get('jm_db_schema_name', 'jobmaster'),
+    logger=print,
+    _validate_dependencies=True
+)
