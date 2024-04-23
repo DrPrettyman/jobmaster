@@ -328,17 +328,19 @@ class JobMaster:
         with self._engine.connect() as conn:
             _processes_result = conn.execute(
                 sqlalchemy.text(
-                    f"WITH running_jobs AS ("
-                    f"  SELECT type_key_out, task_key_out "
-                    f"  FROM {self._schema}.current_jobs() "
-                    f"  WHERE status_out = 2 "
-                    f"  AND system_node_name_out = '{__SYSTEM_NODE_NAME__}' "
-                    f") "
-                    f"SELECT SUM(tsk.process_units) AS total_process_units "
-                    f"FROM running_jobs "
-                    f"LEFT JOIN {self._schema}.tasks tsk "
-                    f"ON running_jobs.type_key_out = tsk.type_key "
-                    f"AND running_jobs.task_key_out = tsk.task_key; "
+                    f"""
+                    WITH running_jobs AS (
+                      SELECT type_key_out, task_key_out 
+                      FROM {self._schema}.current_jobs() 
+                      WHERE status_out = 2 
+                      AND system_node_name_out = '{__SYSTEM_NODE_NAME__}' 
+                    ) 
+                    SELECT SUM(tsk.process_units) AS total_process_units 
+                    FROM running_jobs 
+                    LEFT JOIN {self._schema}.tasks tsk 
+                    ON running_jobs.type_key_out = tsk.type_key 
+                    AND running_jobs.task_key_out = tsk.task_key; 
+                """
                 )
             )
             conn.commit()
@@ -358,10 +360,13 @@ class JobMaster:
         if not self._dependencies_validated:
             self._validate_dependencies()
 
-        available_process_units = self.available_process_units()
-        if available_process_units <= 0:
-            self.logger.info("No available process units")
-            return None
+        # Taking out the lines below because the check on process units
+        # is now within the main sql query.
+
+        # available_process_units = self.available_process_units()
+        # if available_process_units <= 0:
+        #     self.logger.info("No available process units")
+        #     return None
 
         collect_id: str = str(uuid.uuid4())
         with self._engine.connect() as conn:
@@ -375,31 +380,47 @@ class JobMaster:
             _result = conn.execute(
                 sqlalchemy.text(
                     f"""
-                    WITH waiting_jobs AS (
-                        SELECT    job_id_out,
-                                  type_key_out, 
-                                  task_key_out, 
-                                  status_out, 
-                                  priority_out, 
-                                  created_at_out, 
-                                  arguments_out 
+                    WITH waiting_and_running_jobs AS (
+                        SELECT    job_id_out AS job_id,
+                                  type_key_out AS type_key, 
+                                  task_key_out AS task_key, 
+                                  status_out AS status, 
+                                  priority_out AS priority, 
+                                  created_at_out AS created_at, 
+                                  arguments_out AS arguments,
+                                  system_node_name_out AS system_node_name 
                         FROM {self._schema}.current_jobs() 
-                        WHERE status_out = 1 
-                    ) 
-                    SELECT  wj.job_id_out,
-                            wj.type_key_out, 
-                            wj.task_key_out, 
-                            wj.status_out, 
-                            wj.priority_out, 
-                            wj.created_at_out, 
-                            wj.arguments_out,
+                        WHERE status_out in (1, 2) 
+                    ), waiting_jobs AS (
+                        SELECT   job_id, type_key, task_key, status, priority, created_at, arguments
+                        FROM     waiting_and_running_jobs
+                        WHERE    status = 1
+                    ), jobs_running_on_system AS (
+                        SELECT   type_key, task_key
+                        FROM     waiting_and_running_jobs
+                        WHERE    status = 2
+                        AND      system_node_name = '{__SYSTEM_NODE_NAME__}' 
+                    ), p_units AS (
+                        SELECT  SUM(tsk.process_units) AS total_process_units 
+                        FROM    jobs_running_on_system jsys
+                        LEFT JOIN {self._schema}.tasks tsk 
+                        ON  jsys.type_key = tsk.type_key 
+                        AND jsys.task_key = tsk.task_key
+                    )
+                    SELECT  wj.job_id,
+                            wj.type_key, 
+                            wj.task_key, 
+                            wj.status, 
+                            wj.priority, 
+                            wj.created_at, 
+                            wj.arguments,
                             tsk.process_units 
                     FROM waiting_jobs wj 
                     LEFT JOIN {self._schema}.tasks tsk 
-                    ON wj.type_key_out = tsk.type_key 
-                    AND wj.task_key_out = tsk.task_key 
-                    WHERE tsk.process_units <= {available_process_units}
-                    ORDER BY priority_out DESC, created_at_out ASC 
+                    ON  wj.type_key = tsk.type_key 
+                    AND wj.task_key = tsk.task_key 
+                    WHERE tsk.process_units <= {self._system_process_units} - COALESCE((SELECT total_process_units FROM p_units), 0)
+                    ORDER BY priority DESC, created_at ASC 
                     LIMIT 1; 
                     """
                 )
@@ -412,14 +433,14 @@ class JobMaster:
                 top_job_out = results[0]
                 self.logger.info(f"Found a job to run: {top_job_out.job_id_out}")
                 new_job = self.job(
-                    job_id=top_job_out.job_id_out,
+                    job_id=top_job_out.job_id,
                     collect_id=collect_id,
-                    type_key=top_job_out.type_key_out,
-                    task_key=top_job_out.task_key_out,
-                    status=top_job_out.status_out,
-                    priority=top_job_out.priority_out,
-                    created_at=top_job_out.created_at_out,
-                    arguments=top_job_out.arguments_out
+                    type_key=top_job_out.type_key,
+                    task_key=top_job_out.task_key,
+                    status=top_job_out.status,
+                    priority=top_job_out.priority,
+                    created_at=top_job_out.created_at,
+                    arguments=top_job_out.arguments
                 )
                 sql = new_job.update(status=2, message="Popped from queue", _execute=False)
                 conn.execute(sql)
