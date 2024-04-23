@@ -224,13 +224,28 @@ In this example, the task `bar` depends on the task `foo` with `a=1` and `b` the
 When a job with task-type `"bar"` is popped from the queue, JobMaster will first check if there is a job for task-type `"foo"` with `a=1` and `b` the same as the `b` of the job for `bar`, which has been **completed in the past 2 hours**.
 If there isn't, it will insert a job for task-type `"foo"` with `a=1` and `b` the same as the `b` of the job for `bar` into the queue, with a higher priority than the job for `bar`, then re-insert the job for `bar` into the queue.
 
-#### Process limits
+#### Process units
 
-You can specify a process limit for a task by passing an integer to the `process_limit` argument of the `@task` decorator:
+JobMaster can limit jobs using process units. 
+
+When a JobMaster object is initialised, the number of process units available on the system is passed as an argument:
+```python
+jobmaster = JobMaster(db_engine=my_database_engine, system_process_units=1_000)
+```
+The default value is 100,000 if this argument is not specified.
+
+You can then specify the number of process units a task requires by passing an integer to the `process_units` argument of the `@task` decorator. If this argument is not specified, the task will require 1 process unit by default.
+
+You can potentially think of process units as Megabytes of RAM. So if you want to restrict JobMaster to using 1GB, set `system_process_units=1_000` and set `process_units` for each task according to how much RAM you expect it to use in MB.
+
+When JobMaster attempts to pop a job from the queue, it checks the queue for all "running" jobs on the same system and sums their process units. This is subtracted from the system process units to get the available process units.
+Then, when checking the queue for "waiting" jobs to pop, there is a `WHERE process_units <= available_process_units` clause.
+
+Example:
 ```python
 from jobmaster import task, Dependency, same
 
-@task(type_key='cool_tasks', process_limit=10, write_all=['b'])
+@task(process_units=10, write_all=['b'])
 def foo(a: int, b: [1, 2, 3]):
     # do something
 
@@ -238,10 +253,8 @@ def foo(a: int, b: [1, 2, 3]):
     type_key='cool_tasks', 
     write_all=['b'],
     dependencies=Dependency(foo, 2, a=1, b=same),
-    process_limit=3
+    process_units=20
 )
 def bar(a: int, b: [1, 2, 3], c: str):
     # do something
 ```
-In this example, JobMaster will not execute more than 10 jobs of type `"foo"` at the same time on the same system, and will not execute more than 3 jobs of type `"bar"` at the same time on the same system.
-
