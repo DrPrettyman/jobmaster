@@ -370,13 +370,13 @@ class JobMaster:
 
         collect_id: str = str(uuid.uuid4())
         with self._engine.connect() as conn:
+            # first we lock the collect_id table, this prevents other instances trying to run the queue_pop() method
             conn.execute(
                 sqlalchemy.text(
                     f"LOCK TABLE {self._schema}.collect_ids IN ACCESS EXCLUSIVE MODE; "
                     f"INSERT INTO {self._schema}.collect_ids (collect_id) VALUES ('{collect_id}');"
                 )
             )
-
             _result = conn.execute(
                 sqlalchemy.text(
                     f"""
@@ -425,13 +425,14 @@ class JobMaster:
                     """
                 )
             )
+            # Create a new job from the result
             results = _result.all()
             if len(results) == 0:
                 self.logger.info("Queue is empty. No jobs to run.")
                 new_job = None
             else:
                 top_job_out = results[0]
-                self.logger.info(f"Found a job to run: {top_job_out.job_id_out}")
+                self.logger.info(f"Found a job to run: {top_job_out.job_id}")
                 new_job = self.job(
                     job_id=top_job_out.job_id,
                     collect_id=collect_id,
@@ -442,6 +443,8 @@ class JobMaster:
                     created_at=top_job_out.created_at,
                     arguments=top_job_out.arguments
                 )
+                # Execute the update status for this job within this same transaction,
+                # while the collect_ids table is still locked.
                 sql = new_job.update(status=2, message="Popped from queue", _execute=False)
                 conn.execute(sql)
             conn.commit()
