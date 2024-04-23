@@ -78,6 +78,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+.ipynb
 
 # IPython
 profile_default/
@@ -130,7 +131,3 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-/decorator-test.ipynb
-/pop-job-test.ipynb
-/test.ipynb
-/test2.ipynb
