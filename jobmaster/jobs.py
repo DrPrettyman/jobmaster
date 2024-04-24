@@ -199,7 +199,8 @@ class Job:
         if self.message is None:
             _message = "NULL"
         else:
-            _message = f"'{self.message}'"
+            _m = self.message.replace("'", "`")
+            _message = f"'{_m}'"
 
         queue_row = f"('{self.job_id}', {_collect_id}, {self._status}, '{__SYSTEM_NODE_NAME__}', {__SYSTEM_PID__}, '{self._cmd_id}', '{datetime.datetime.utcnow()}', {self.priority}, '{self.task.type_key}', '{self.task.key}', {_message})"
         arg_rows = [f"('{self.job_id}', '{_k}', '{json.dumps(_v)}'::json)" for _k, _v in self.arguments.items()]
