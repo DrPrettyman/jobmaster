@@ -340,7 +340,7 @@ begin
     end if;
     
     insert into @SCHEMA_NAME.jobs
-    values (new_job_id, null, 1, system_name_in, 0, 'external', now(), priority_in, type_key_in, task_key_in, 'Inserted using insert_job procedure');
+    values (new_job_id, null, 1, system_name_in, 0, 'external', now(), priority_in, type_key_in, task_key_in, '[waiting] Inserted using insert_job procedure');
     
     insert into @SCHEMA_NAME.arguments
     select  new_job_id as job_id,
