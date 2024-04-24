@@ -1,12 +1,12 @@
 import sqlalchemy
-import pg8000
+from pg8000.exceptions import DatabaseError
 
 
 def deploy(db_engine: sqlalchemy.engine.base.Engine, schema: str, reset: bool = False):
     if reset:
         _kill(db_engine, schema)
     _create_schema(db_engine, schema)
-    _create_functions(db_engine, schema)
+    _create_types(db_engine, schema)
     _create_tables(db_engine, schema)
     _create_functions(db_engine, schema)
 
@@ -24,21 +24,15 @@ def _create_types(db_engine: sqlalchemy.engine.base.Engine, schema: str):
             conn.execute(
                 sqlalchemy.text(
                     f"""
-                            CREATE TABLE IF NOT EXISTS {schema}.arguments (
-                                job_id      uuid NOT NULL,
-                                arg_key     text,
-                                arg_value   json
-                            );
-        
-                            CREATE TYPE jobmaster_argument AS (
-                                arg_key     text,
-                                arg_value   json
-                            );
-                            """
+                    CREATE TYPE jobmaster_argument AS (
+                        arg_key     text,
+                        arg_value   json
+                    );
+                    """
                 )
             )
             conn.commit()
-    except pg8000.exceptions.DatabaseError as e:
+    except DatabaseError as e:
         pass
 
 
@@ -159,12 +153,8 @@ def _create_tables(db_engine: sqlalchemy.engine.base.Engine, schema: str):
 
 
 def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
-    with db_engine.connect() as conn:
-        # table functions
-        conn.execute(
-            sqlalchemy.text(
-                f"""    
-                CREATE OR REPLACE FUNCTION {schema}.current_jobs () 
+    current_jobs_function_sql = """
+    CREATE OR REPLACE FUNCTION @SCHEMA_NAME.current_jobs () 
                 RETURNS TABLE (
                     job_id_out uuid,
                     type_key_out text,
@@ -184,7 +174,7 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                     RETURN QUERY
                         WITH most_recent as (
                             SELECT      job_id, max(updated_at) as updated_at, min(updated_at) as created_at
-                            FROM        {schema}.jobs
+                            FROM        @SCHEMA_NAME.jobs
                             GROUP BY    job_id
                         ), all_jobs AS (
                             SELECT  most_recent.job_id,
@@ -197,7 +187,7 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                                     j1.cmd_id,
                                     most_recent.created_at,
                                     most_recent.updated_at
-                            FROM    {schema}.jobs j1
+                            FROM    @SCHEMA_NAME.jobs j1
                             RIGHT JOIN most_recent
                             ON  most_recent.job_id = j1.job_id and most_recent.updated_at = j1.updated_at
                         ), 
@@ -205,7 +195,7 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                             SELECT  all_jobs.job_id,
                                     array_agg(row(args_table.arg_key, args_table.arg_value)::jobmaster_argument) as args
                             FROM  all_jobs
-                            LEFT JOIN {schema}.arguments args_table
+                            LEFT JOIN @SCHEMA_NAME.arguments args_table
                             ON all_jobs.job_id = args_table.job_id
                             GROUP BY all_jobs.job_id
                         )
@@ -227,17 +217,155 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                         ;
                 END;
                 $$;
-                """
-            )
-        )
+    """.replace("@SCHEMA_NAME", schema)
+    insert_procedure_sql = """
+create or replace procedure @SCHEMA_NAME.insert_job(
+    type_key_in text,
+    task_key_in text,
+    arguments_in json,
+    priority_in integer default 1,
+    system_name_in text default 'external',
+    new_job_id inout uuid default null,
+    message_out inout text default null
+)
+language plpgsql    
+as $$
+declare 
+    conflicting_jobs uuid[];
+    missing_arguments text[];
+begin
+    -- if no job_id was provided, generate one
+    select coalesce(new_job_id, gen_random_uuid()) into new_job_id;
+    
+    -- check if the job is already in the queue
+    if new_job_id in (select distinct job_id from @SCHEMA_NAME.jobs)
+    then 
+        select 'job already in queue' into message_out;
+        return;
+    end if;
+    
+    -- check the task exists
+    if (select count(*) from @SCHEMA_NAME.tasks where type_key = type_key_in and task_key = task_key_in) = 0
+    then
+        select 'Invalid task: ' || type_key_in || '.' || task_key_in into message_out;
+        select null into new_job_id;
+        return;
+    end if;
+    
+    -- check that the user provided the correct arguments
+    with 
+    -- create argsin table with the input data
+    argsin as (
+        select key as arg_key, value as arg_value, TRUE as yes from json_each(arguments_in)
+    ), 
+    -- select parameter_key from tasks matching the type_key and task_key
+    t1 as (
+        select parameter_key
+        from @SCHEMA_NAME.parameters p
+        where p.type_key = type_key_in and p.task_key = task_key_in and p.required = TRUE
+    ), kvpairs as (
+        select  t1.parameter_key,
+                argsin.yes
+        from t1 
+        left join argsin
+        on t1.parameter_key = argsin.arg_key
+    )
+    select array_agg(parameter_key)
+    from kvpairs
+    where yes is null
+    into missing_arguments;
+    
+    if array_length(missing_arguments, 1) > 0
+    then 
+        select 'Missing arguments: ' || array_to_string(missing_arguments, ', ') into message_out;
+        select null into new_job_id;
+        return;
+    end if;
+    
+    lock table @SCHEMA_NAME.jobs in ROW EXCLUSIVE mode;
+    
+    -- check if a job with the same args is already waiting/running
+    with 
+    -- create argsin and taskin: tables with the input data
+    argsin as (
+        select key as arg_key, value as arg_value from json_each(arguments_in)
+    ), taskin as (
+        select  type_key_in as type_key, task_key_in as task_key
+    ), 
+    -- get all jobs with current status 1 or 2
+    wr_jobs as (
+        select j.job_id, j.type_key, j.task_key 
+        from @SCHEMA_NAME.jobs j
+        right join (select job_id, max(updated_at) as updated_at from @SCHEMA_NAME.jobs group by job_id) k
+        on j.job_id = k.job_id and j.updated_at = k.updated_at
+        where j.status in (1, 2)
+    ), 
+    -- get jobs with the same type_key and task_key as the input
+    task_confilicts as (
+        select  wr_jobs.job_id
+        from    taskin
+        inner join wr_jobs
+        on taskin.type_key = wr_jobs.type_key and taskin.task_key = wr_jobs.task_key
+    ), 
+    -- get the arguments of those jobs
+    args_of_task_confilicts as (
+        select      a.job_id, a.arg_key, a.arg_value
+        from        task_confilicts
+        left join   @SCHEMA_NAME.arguments a
+        on task_confilicts.job_id = a.job_id
+    ), 
+    -- join with argsin on the key and value, then count the rows
+    arg_conflicts as (
+        select  a.job_id, count(*) as arg_count
+        from    argsin
+        inner join args_of_task_confilicts a
+        on argsin.arg_key = a.arg_key and argsin.arg_value::jsonb = a.arg_value::jsonb
+        group by a.job_id
+    ), 
+    -- if any job has the same number of matching args as there are input args, we know it has all the same args
+    conflicts as (
+        select a.job_id
+        from   arg_conflicts a
+        where  a.arg_count >= (select count(*) from argsin)
+    )
+    -- finally select the ids of conflicting jobs into an array
+    select array_agg(job_id) from conflicts into conflicting_jobs;
+    
+    -- if there are any conflicting jobs, we return
+    if array_length(conflicting_jobs, 1) > 0
+    then 
+        select 'Job with same specification already in queue. Returning job_id for that job.' into message_out;
+        select conflicting_jobs[1] into new_job_id;
+        return;
+    end if;
+    
+    insert into @SCHEMA_NAME.jobs
+    values (new_job_id, null, 1, system_name_in, 0, 'external', now(), priority_in, type_key_in, task_key_in, 'Inserted using insert_job procedure');
+    
+    insert into @SCHEMA_NAME.arguments
+    select  new_job_id as job_id,
+            key        as arg_key,
+            value      as arg_value 
+    from json_each(arguments_in);
+    
+    --commit;
+    
+    select 'inserted job' into message_out;
+    
+end;$$;
+""".replace("@SCHEMA_NAME", schema)
 
+    with db_engine.connect() as conn:
+        # table functions
+        conn.execute(sqlalchemy.text(current_jobs_function_sql))
+        conn.execute(sqlalchemy.text(insert_procedure_sql))
         conn.commit()
 
 
 def _kill(db_engine: sqlalchemy.engine.base.Engine, schema: str):
     with db_engine.connect() as conn:
         conn.execute(sqlalchemy.text(f"DROP SCHEMA IF EXISTS {schema} CASCADE;"))
-        conn.execute(sqlalchemy.text(f"DROP TYPE IF EXISTS argument CASCADE;"))
+        conn.execute(sqlalchemy.text(f"DROP TYPE IF EXISTS jobmaster_argument CASCADE;"))
         conn.commit()
 
 
