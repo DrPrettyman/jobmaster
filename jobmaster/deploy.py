@@ -219,7 +219,7 @@ def _create_functions(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                 $$;
     """.replace("@SCHEMA_NAME", schema)
     insert_procedure_sql = """
-create or replace procedure @SCHEMA_NAME.insert_job(
+create or replace procedure @SCHEMA_NAME.insert(
     type_key_in text,
     task_key_in text,
     arguments_in json,
