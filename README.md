@@ -5,7 +5,13 @@ It works with any PostgreSQL database, and is designed to be simple to use and e
 
 ## Installation
 
-Not yet publised on pip.
+Published to PyPi at https://pypi.org/project/jobmaster/.
+
+Simply use pip:
+
+```shell
+pip install jobmaster
+```
 
 ## Usage
 
