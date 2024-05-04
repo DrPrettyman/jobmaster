@@ -88,7 +88,8 @@ def _create_tables(db_engine: sqlalchemy.engine.base.Engine, schema: str):
                             task_key                text NOT NULL,
                             dependency_type_key     text NOT NULL,
                             dependency_task_key     text NOT NULL,
-                            argument                text NOT NULL
+                            argument                text NOT NULL,
+                            operations              bool NOT NULL
                         );
                         
                         CREATE TABLE IF NOT EXISTS {schema}.dependency_args_specified (

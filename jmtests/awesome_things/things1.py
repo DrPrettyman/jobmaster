@@ -1,4 +1,4 @@
-from jobmaster import task, same, Dependency
+from jobmaster import task, same, dep
 
 
 @task
@@ -13,7 +13,7 @@ def foo(file_path: str, number: [1, 2, 3]):
         f.write(str(number))
 
 
-@task(dependencies=Dependency(foo, 1, file_path=same))
+@task(dependencies=[dep(foo, 1, file_path=same)])
 def bar(file_path: str, number: [4, 5, 6]):
     """
     Multiply the number in a file by another number.

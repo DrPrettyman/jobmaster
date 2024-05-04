@@ -7,11 +7,53 @@ from . import utils
 
 
 class SameParameter:
+    def __init__(self):
+        self.operations = list()
+
     def __bool__(self):
         return True
 
     def __repr__(self):
         return "same"
+
+    def __add__(self, other):
+        new = SameParameter()
+        new.operations = self.operations + [('+', other)]
+        return new
+
+    def __sub__(self, other):
+        new = SameParameter()
+        new.operations = self.operations + [('-', other)]
+        return new
+
+    def __mul__(self, other):
+        new = SameParameter()
+        new.operations = self.operations + [('*', other)]
+        return new
+
+    def __truediv__(self, other):
+        new = SameParameter()
+        new.operations = self.operations + [('/', other)]
+        return new
+
+    @property
+    def has_operations(self):
+        return bool(self.operations)
+
+    def value(self, _value):
+        try:
+            for _op, _val in self.operations:
+                if _op == '+':
+                    _value += _val
+                elif _op == '-':
+                    _value -= _val
+                elif _op == '*':
+                    _value *= _val
+                elif _op == '/':
+                    _value /= _val
+            return _value
+        except TypeError:
+            raise ValueError(f"Invalid operation for SameParameter: {self.operations}")
 
 
 class Dependency:
@@ -64,7 +106,7 @@ class Dependency:
             if _k == '_hours_':
                 _k = 'hours'
             if isinstance(_v, SameParameter):
-                args_same.append(_k)
+                args_same.append((_k, _v))
             else:
                 args_specified.append((_k, _v))
 
@@ -99,7 +141,7 @@ class Parameter:
         self.write_all = write_all
 
     def __repr__(self):
-        return f"Parameter: {self.name}"
+        return f"Parameter: {self.name} ({self.value_type})"
 
     @property
     def db_value(self):
@@ -253,9 +295,9 @@ class Task:
         ]
 
         dep_args_same_rows = [
-            f"'{self.type_key}', '{self.key}', '{_dep.type_key}', '{_dep.task_key}', '{_arg}'"
+            f"'{self.type_key}', '{self.key}', '{_dep.type_key}', '{_dep.task_key}', '{_arg}', '{int(_sp.has_operations)}'"
             for _dep in self.dependencies
-            for _arg in _dep.args_same
+            for _arg, _sp in _dep.args_same
         ]
 
         dep_args_specified_rows = [

@@ -220,9 +220,9 @@ class Job:
         selects = []
         for _dep in self.task.dependencies:
             args = [(_k, _v) for _k, _v in _dep.args_specified]
-            for _k in _dep.args_same:
+            for _k, _s in _dep.args_same:
                 if _k in self.arguments.keys():
-                    args.append((_k, self.arguments[_k]))
+                    args.append((_k, _s.value(self.arguments[_k])))
                 else:
                     raise ValueError(f"Dependency argument {_k} not found in job arguments")
 
@@ -351,8 +351,14 @@ class Job:
                 time=_dep.time
             )
             _args = dict()
-            for _k in _dep.args_same:
-                _args[_k] = self.arguments[_k]
+            for _k, _sp in _dep.args_same:
+                if _k in self.arguments.keys():
+                    try:
+                        _args[_k] = _sp.value(self.arguments[_k])
+                    except ValueError:
+                        raise ValueError(f"Dependency parameter '{_k}' value not valid")
+                else:
+                    raise ValueError(f"Dependency parameter '{_k}' not found in job arguments")
             for _k, _v in _dep.args_specified:
                 _args[_k] = _v
             _d['arguments'] = _args
@@ -361,7 +367,12 @@ class Job:
 
     def required_dependency_jobs(self):
         required = []
-        for _dep in self.dependencies_specific():
+        try:
+            dependencies_specific = self.dependencies_specific()
+        except ValueError:
+            self.update(status=4, message="Error parsing dependencies", _message_level='error')
+            return []
+        for _dep in dependencies_specific:
             _dep_is_required = True
             for _qj in self.dependencies_in_queue():
                 if _dep['type_key'] == _qj['type_key'] and _dep['task_key'] == _qj['task_key'] and all(
@@ -518,6 +529,8 @@ class JobMaster:
             for _sql in statements:
                 conn.execute(_sql)
             conn.commit()
+
+        self.logger.info("Written tasks to database")
 
     def deploy(self, reset: bool = False):
 
