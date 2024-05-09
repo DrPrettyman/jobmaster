@@ -7,6 +7,18 @@ from typing import Callable
 from . import utils
 
 
+class MissingArgument(Exception):
+    def __init__(self, arg_key: str):
+        self.arg_key = arg_key
+        super().__init__(f"Missing parameter: {arg_key}")
+
+
+class MissingClassArgument(Exception):
+    def __init__(self, arg_key: str):
+        self.arg_key = arg_key
+        super().__init__(f"Missing class parameter: {arg_key}")
+
+
 class SameParameter:
     def __init__(self):
         self.operations = list()
@@ -299,6 +311,18 @@ class Task:
         return [_.name for _ in self.parameters]
 
     @property
+    def class_parameter_keys(self):
+        return [_.name for _ in self.class_parameters]
+
+    @property
+    def required_parameter_keys(self):
+        return [_.name for _ in self.parameters if _.required]
+
+    @property
+    def required_class_parameter_keys(self):
+        return [_.name for _ in self.class_parameters if _.required]
+
+    @property
     def parameter_dict(self):
         return {_.name: _ for _ in self.parameters}
 
@@ -343,8 +367,17 @@ class Task:
         return f"'{self.type_key}', '{self.key}', '{self.help}', {self.process_units}, {_write_all}"
 
     def execute(self, **kwargs):
+        function_kwargs = dict()
+        for _param in self.parameters:
+            if _param.name in kwargs:
+                function_kwargs[_param.name] = kwargs.get(_param.name)
+            elif _param.required is False:
+                function_kwargs[_param.name] = _param.default_value
+            else:
+                raise MissingArgument(_param.name)
+
         if self._class is None:
-            return self.function(**kwargs)
+            return self.function(**function_kwargs)
 
         class_kwargs = dict()
         for _param in self.class_parameters:
@@ -353,10 +386,10 @@ class Task:
             elif _param.required is False:
                 class_kwargs[_param.name] = _param.default_value
             else:
-                raise ValueError(f"Missing required parameter: {_param.name}")
+                raise MissingClassArgument(_param.name)
 
         _class_instance = self._class(**class_kwargs)
-        return getattr(_class_instance, self.function.__name__)(**kwargs)
+        return getattr(_class_instance, self.function.__name__)(**function_kwargs)
 
 
 class TaskType:

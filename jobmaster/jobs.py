@@ -396,10 +396,14 @@ class Job:
         _success = False
         try:
             result = self.task.execute(**self.arguments)
-            self.update(status=3, message=f"Executed at {datetime.datetime.utcnow()} with result: {str(result)}")
+            self.update(status=3, message=f"Executed at {datetime.datetime.utcnow()} with result: {result}")
             _success = True
+        except tasks.MissingArgument as _error:
+            self.update(status=4, message=f"Missing argument: {_error.arg_key}", _message_level='error')
+        except tasks.MissingClassArgument as _error:
+            self.update(status=4, message=f"Missing class argument: {_error.arg_key}", _message_level='error')
         except Exception as _error:
-            self.update(status=4, message=f"Error at {datetime.datetime.utcnow()}: {_error}", _message_level='error')
+            self.update(status=4, message=f"Error at {datetime.datetime.utcnow()}: {_error.message}", _message_level='error')
         return _success
 
 
