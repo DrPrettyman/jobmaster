@@ -26,6 +26,17 @@ _status_lookup = {
 }
 
 
+class NotExecuted(Exception):
+    def __init__(self, job_id):
+        self.job_id = job_id
+
+    def __repr__(self):
+        return f"Job {self.job_id} not executed"
+
+    def __str__(self):
+        return self.__repr__()
+
+
 class Job:
     def __init__(self,
                  cmd_id: str,
@@ -93,6 +104,9 @@ class Job:
                     else:
                         self.logger.error(f"Argument `{_param.name}` is required but not provided")
 
+        self.executed = False
+        self._result = NotExecuted(job_id=self.job_id)
+
         self.logger.info(f"Initialised local Job instance with ID: {self.job_id}")
 
     def __bool__(self):
@@ -150,6 +164,10 @@ class Job:
     @property
     def status_str(self):
         return _status_lookup[self._status]
+
+    @property
+    def result(self):
+        return self._result
 
     def arguments_for_spawned_jobs(self) -> list[dict]:
         options = dict()
@@ -391,20 +409,28 @@ class Job:
         self.logger.debug(f"Required dependencies: {len(required)}")
         return required
 
-    def safe_execute(self):
+    def safe_execute(self) -> int:
         self.logger.debug(f"Executing job {self.job_id}")
-        _success = False
         try:
             result = self.task.execute(**self.arguments)
-            self.update(status=3, message=f"Executed at {datetime.datetime.utcnow()} with result: {result}")
-            _success = True
+            self.update(status=3, message=f"Executed with result: {result}")
+            self.executed = True
+            self._result = result
+            _code = 0
         except tasks.MissingArgument as _error:
             self.update(status=4, message=f"Missing argument: {_error.arg_key}", _message_level='error')
+            self._result = _error
+            _code = 1
         except tasks.MissingClassArgument as _error:
             self.update(status=4, message=f"Missing class argument: {_error.arg_key}", _message_level='error')
+            self._result = _error
+            _code = 1
         except Exception as _error:
-            self.update(status=4, message=f"Error at {datetime.datetime.utcnow()}: {_error.message}", _message_level='error')
-        return _success
+            self._result = _error
+            self.update(status=4, message=f"Error: {_error}", _message_level='error')
+            _code = 2
+
+        return _code
 
 
 class JobMaster:
