@@ -11,6 +11,11 @@ def wrap_string(_value):
     return _value
 
 
+def camel_to_snake(name):
+    name = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', name).lower()
+
+
 def parse_params_from_doc(doc_string):
     if doc_string is None:
         return dict()

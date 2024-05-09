@@ -1,6 +1,7 @@
 import inspect
 import json
 import re
+import sys
 from typing import Callable
 
 from . import utils
@@ -188,15 +189,23 @@ class Task:
         self.dependencies = dependencies
 
         self.type_key = type_key
-        self.key = function.__name__
+        self.key = function.__qualname__
 
         self.module = function.__module__
         self.absfile = inspect.getabsfile(function)
+
+        self.class_signature = None
+        self._class = None
+
+        _qualname = tuple(function.__qualname__.split('.'))
+        if len(_qualname) == 2:
+            self._class = sys.modules[self.module].__dict__[_qualname[0]]
 
         self.write_all = write_all
         self.process_units = process_units
 
         self._parameters = None
+        self._class_parameters = None
         self._help = None
 
     def __eq__(self, other):
@@ -229,9 +238,15 @@ class Task:
                 s += ")"
         return s
 
-    def _parse_parameters(self) -> list[Parameter]:
-        _docstring = inspect.getdoc(self.function)
-        _signature = inspect.signature(self.function)
+    def _parse_parameters(self, _type = "function") -> list[Parameter]:
+        if _type == "function":
+            _docstring = inspect.getdoc(self.function)
+            _signature = inspect.signature(self.function)
+        elif _type == "class":
+            _docstring = inspect.getdoc(self._class)
+            _signature = inspect.signature(self._class)
+        else:
+            raise ValueError(f"Invalid type: {_type}")
 
         params_from_doc = utils.parse_params_from_doc(_docstring)
         params_from_sig = utils.parse_params_from_signature(_signature)
@@ -270,8 +285,14 @@ class Task:
     @property
     def parameters(self):
         if self._parameters is None:
-            self._parameters = self._parse_parameters()
+            self._parameters = self._parse_parameters(_type="function")
         return self._parameters
+
+    @property
+    def class_parameters(self):
+        if self._class_parameters is None:
+            self._class_parameters = self._parse_parameters(_type="class")
+        return self._class_parameters
 
     @property
     def parameter_keys(self):
@@ -320,6 +341,22 @@ class Task:
             _write_all = f"ARRAY['{', '.join(self.write_all)}']"
 
         return f"'{self.type_key}', '{self.key}', '{self.help}', {self.process_units}, {_write_all}"
+
+    def execute(self, **kwargs):
+        if self._class is None:
+            return self.function(**kwargs)
+
+        class_kwargs = dict()
+        for _param in self.class_parameters:
+            if _param.name in kwargs:
+                class_kwargs[_param.name] = kwargs.get(_param.name)
+            elif _param.required is False:
+                class_kwargs[_param.name] = _param.default_value
+            else:
+                raise ValueError(f"Missing required parameter: {_param.name}")
+
+        _class_instance = self._class(**class_kwargs)
+        return getattr(_class_instance, self.function.__name__)(**kwargs)
 
 
 class TaskType:

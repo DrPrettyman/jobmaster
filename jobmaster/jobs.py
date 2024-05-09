@@ -395,7 +395,7 @@ class Job:
         self.logger.debug(f"Executing job {self.job_id}")
         _success = False
         try:
-            result = self.task.function(**self.arguments)
+            result = self.task.execute(**self.arguments)
             self.update(status=3, message=f"Executed at {datetime.datetime.utcnow()} with result: {str(result)}")
             _success = True
         except Exception as _error:
