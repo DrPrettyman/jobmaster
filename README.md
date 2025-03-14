@@ -11,6 +11,8 @@ call jobmaster.insert_job('my_tasks', 'foo', 10, '{"a": 1, "b": 2}'::json)
 ```
 Whenever your python script runs (for example, on a cron) the job will be retrived from the database and will run `my_tasks.foo(a=1, b=2)`. 
 
+There is a lot of additional functionality to explore using optional arguments of the `@task()` decorator. 
+
 
 ## Installation
 
