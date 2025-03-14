@@ -1,7 +1,16 @@
 # JobMaster
 
-JobMaster is a simple job scheduling library for Python. 
+JobMaster is a simple job-queue system which allows Python back-end tasks to be triggered or scheduled using a webhook. 
 It works with any PostgreSQL database, and is designed to be simple to use and easy to integrate into your existing codebase.
+
+The `deploy()` method creates a schema with all necessary tables and procedures in any PostgreSQL database. 
+Then, add the `@task` decorator to any python functions — for example a function named `foo()` in module named `my_tasks`.
+In your web app, you might have a button which passes the following procedure call to your PostgreSQL database:
+```postgresql
+call jobmaster.insert_job('my_tasks', 'foo', 10, '{"a": 1, "b": 2}'::json)
+```
+Whenever your python script runs (for example, on a cron) the job will be retrived from the database and will run `my_tasks.foo(a=1, b=2)`. 
+
 
 ## Installation
 
